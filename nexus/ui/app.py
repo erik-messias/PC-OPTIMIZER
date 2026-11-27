@@ -11,7 +11,7 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from .. import cleaning, diagnostics as dg, drivers as drv, hardware as hw, optimize as opt
-from .. import repair as rp, startup as st, bottleneck as bn, relatorio as rel, update as up
+from .. import repair as rp, startup as st, bottleneck as bn, relatorio as rel, update as up, lhm
 from ..core import (APP, HIST, IS_WIN, PASTA, PASTA_REL, VERSAO, carregar_config, fmt_bytes, is_admin, log,
                     plano_ativo, salvar_config)
 from . import theme as T
@@ -633,13 +633,19 @@ class Monitor(Pagina):
             lbl.config(text=f"{v:.0f}{un}" if v is not None else "N/D")
         n = os.cpu_count() or 0
         extra = []
+        if s.get("cpu_consumo") is not None:
+            extra.append(f"CPU consumo {s['cpu_consumo']:.0f} W")
+        if s.get("disco_temp") is not None:
+            extra.append(f"disco {s['disco_temp']:.0f} °C")
+        if s.get("ventoinhas"):
+            extra.append("ventoinhas " + ", ".join(f"{n} {v:.0f} RPM" for n, v in s["ventoinhas"][:3]))
         if s.get("gpu_consumo") is not None:
             extra.append(f"GPU consumo {s['gpu_consumo']:.0f} W")
         if s.get("gpu_freq"):
             extra.append(f"GPU {s['gpu_freq']:.0f} MHz")
         if s.get("gpu_fan") is not None:
             extra.append(f"ventoinha GPU {s['gpu_fan']:.0f}%")
-        fontes = ", ".join(s.get("fontes") or []) or "nenhuma (CPU sem sensor disponível)"
+        fontes = ", ".join(s.get("fontes") or []) or "nenhuma (instale o driver em Configurações > Sensores)"
         partes = [f"Threads lógicas: {n}", f"RAM {fmt_bytes(s['ram_usada'])} / {fmt_bytes(s['ram_total'])}"] + extra
         self.info.config(text=" • ".join(partes) + f"\nFonte de temperatura da CPU: {fontes}")
 
@@ -1047,6 +1053,12 @@ class Config(Pagina):
                      (self.v2, "Já autorizei a limpeza de cache de navegadores")):
             tk.Checkbutton(c.corpo, text=t, variable=v, command=self.salvar, bg=T.PANEL, fg=T.TEXTO, selectcolor=T.PANEL2,
                            activebackground=T.PANEL, activeforeground=T.TEXTO, font=T.fonte(10)).pack(anchor="w")
+        cs = Cartao(self, "Sensores de temperatura", T.LARANJA)
+        cs.pack(fill="x", padx=26, pady=8)
+        self.sens_lbl = tk.Label(cs.corpo, text="", bg=T.PANEL, fg=T.MUDO, font=T.fonte(10), justify="left", anchor="w", wraplength=720)
+        self.sens_lbl.pack(side="left", fill="x", expand=True)
+        self.btn_pawn = Botao(cs.corpo, "Instalar driver de sensores", self.instalar_pawnio)
+        self.btn_pawn.pack(side="right")
         cu = Cartao(self, "Atualizações", T.CIANO)
         cu.pack(fill="x", padx=26, pady=8)
         self.upd = tk.Label(cu.corpo, text=f"Versão instalada: {VERSAO}", bg=T.PANEL, fg=T.MUDO, font=T.fonte(10))
@@ -1057,6 +1069,36 @@ class Config(Pagina):
         tk.Label(c2.corpo, bg=T.PANEL, fg=T.MUDO, font=T.fonte(10), justify="left", anchor="w",
                  text=f"{APP} {VERSAO}\nAdministrador: {'sim' if is_admin() else 'NÃO (algumas funções ficam limitadas)'}\n"
                       f"Dados e logs: {PASTA}").pack(anchor="w")
+
+    def on_show(self):
+        self.atualizar_sensores()
+
+    def atualizar_sensores(self):
+        def fim(est):
+            textos = {
+                "ativo": ("Leitura de temperatura ativa (LibreHardwareMonitor embutido + driver PawnIO).", T.VERDE),
+                "sem_pawnio": ("Leitor de sensores rodando, mas o driver PawnIO não está instalado. Sem ele, a maioria dos "
+                               "processadores não informa a temperatura. O driver é de terceiros (pawnio.eu), assinado, e só "
+                               "é instalado se você aprovar.", T.AMARELO),
+                "desligado": ("Leitor de sensores desligado. Reinicie o NEXUS PC como Administrador.", T.AMARELO),
+                "sem_binario": ("Esta versão não traz o leitor de sensores embutido. Abra o LibreHardwareMonitor para "
+                                "ver as temperaturas.", T.MUDO)}
+            t, cor = textos[est]
+            self.sens_lbl.config(text=t, fg=cor)
+            (self.btn_pawn.pack(side="right") if est == "sem_pawnio" else self.btn_pawn.pack_forget())
+        self.app.bg(lhm.estado, fim, lambda e: None)
+
+    def instalar_pawnio(self):
+        if not messagebox.askyesno(APP, "Instalar o driver PawnIO (pawnio.eu)?\n\n"
+                                        "• É um driver de kernel de terceiros, assinado, usado pelo LibreHardwareMonitor "
+                                        "para ler sensores do processador.\n"
+                                        "• Será criado um ponto de restauração antes.\n"
+                                        "• Para remover depois: winget uninstall namazso.PawnIO\n\n"
+                                        "Você aprova a instalação?"):
+            return
+        self.sens_lbl.config(text="Instalando...", fg=T.CIANO)
+        self.app.bg(lambda: lhm.instalar_pawnio(), lambda r: (messagebox.showinfo(APP, r[1]), self.atualizar_sensores()),
+                    lambda e: self.sens_lbl.config(text=f"Erro: {e}", fg=T.VERMELHO))
 
     def verificar(self):
         self.upd.config(text="Verificando...", fg=T.CIANO)
@@ -1132,6 +1174,8 @@ class App(tk.Tk):
         self.after(50, self._poll)
         threading.Thread(target=self._monitorar, daemon=True).start()
         self.bg(up.verificar, lambda r: self.marcar_update(r[0], r[2], r[3]), lambda e: None)
+        self.bg(lhm.iniciar, None, lambda e: None)
+        self.protocol("WM_DELETE_WINDOW", self.fechar)
 
     # ---- navegação
     def _hover(self, chave, entrou):
@@ -1155,6 +1199,10 @@ class App(tk.Tk):
         pg.on_show()
         if iniciar and hasattr(pg, "iniciar"):
             self.after(100, pg.iniciar)
+
+    def fechar(self):
+        lhm.parar()
+        self.destroy()
 
     def marcar_update(self, nova, url, msg):
         self.url_update = url if nova else ""

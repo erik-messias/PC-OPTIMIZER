@@ -60,6 +60,8 @@ def aplicar_estilos(root):
                 bordercolor=BORDA, lightcolor=PANEL2, darkcolor=PANEL2, selectbackground=PANEL2, selectforeground=TEXTO)
     s.map("TCombobox", fieldbackground=[("readonly", PANEL2)], foreground=[("readonly", TEXTO)],
           selectbackground=[("readonly", PANEL2)], selectforeground=[("readonly", TEXTO)])
+    for w in ("Checkbutton", "Radiobutton"):
+        root.option_add(f"*{w}.highlightThickness", 0)
     root.option_add("*TCombobox*Listbox.background", PANEL2)
     root.option_add("*TCombobox*Listbox.foreground", TEXTO)
     root.option_add("*TCombobox*Listbox.selectBackground", "#1d3557")

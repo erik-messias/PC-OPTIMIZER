@@ -49,6 +49,11 @@ def coletar_contexto(progresso=lambda pct, msg: None, buscar_wu=True):
     progresso(25, "Verificando sistema operacional...")
     ctx["windows"] = ps_json(_PS_WINDOWS, timeout=150, default={}) or {}
     ctx["plano"] = plano_ativo()[1] if IS_WIN else ""
+    try:
+        from . import lhm
+        ctx["sensores"] = lhm.estado() if IS_WIN else ""
+    except Exception:  # noqa: BLE001
+        ctx["sensores"] = ""
 
     progresso(45, "Lendo drivers e dispositivos...")
     drivers, erros = drv.ler_drivers() if IS_WIN else ([], [])
@@ -162,10 +167,19 @@ def diagnosticar(ctx):
                           "Antes de mudar qualquer coisa, analise temperatura, frequência, consumo e driver em Monitoramento.",
                           f"Códigos de limitação: {thr}"))
     if not any(a.get("cpu_temp") is not None for a in am):
+        est = ctx.get("sensores", "")
+        dica = {"sem_pawnio": "Vá em Configurações > Sensores de temperatura e instale o driver PawnIO (pede sua aprovação).",
+                "desligado": "O leitor de sensores não está rodando: reinicie o NEXUS PC como Administrador.",
+                "ativo": "O leitor está ativo, mas o seu processador não expõe sensor. Em alguns notebooks isso é normal."
+                }.get(est, "Abra o LibreHardwareMonitor em segundo plano para ler a temperatura.")
         P.append(Problema("Temperatura do processador indisponível", "Temperaturas", "info", "confirmado",
-                          "O Windows não expõe a temperatura da CPU sem um driver de sensores.",
-                          [], "Abra o LibreHardwareMonitor (gratuito) em segundo plano: o NEXUS PC passa a ler a temperatura "
-                              "e os ventiladores dele automaticamente."))
+                          "O Windows não informa a temperatura da CPU sem um driver de sensores.", [], dica))
+    dt = _media(am, "disco_temp")
+    if dt is not None and dt >= 60:
+        P.append(Problema("Disco com temperatura alta", "Armazenamento", "médio" if dt < 70 else "alto", "confirmado",
+                          f"Um dos discos está a {dt:.0f} °C. Calor constante reduz a vida útil e pode causar lentidão.",
+                          ["Pouca ventilação no gabinete", "SSD NVMe sem dissipador"],
+                          "Melhore o fluxo de ar; em SSD NVMe use dissipador.", f"{dt:.0f} °C"))
 
     # ---- CPU / gargalos
     cpu = _media(am, "cpu")

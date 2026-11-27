@@ -47,12 +47,31 @@ jobs:
           cp pm/PresentMon-*-x64.exe PresentMon.exe
           ls -la PresentMon.exe
 
+      - name: Baixar LibreHardwareMonitor (sensores de temperatura)
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force lhm_zip | Out-Null
+          gh release download --repo LibreHardwareMonitor/LibreHardwareMonitor --pattern "*.zip" --dir lhm_zip
+          $zip = Get-ChildItem lhm_zip -Filter *.zip | Where-Object { $_.Name -notmatch 'NET' } | Select-Object -First 1
+          if (-not $zip) { $zip = Get-ChildItem lhm_zip -Filter *.zip | Select-Object -First 1 }
+          Write-Host "Usando $($zip.Name)"
+          Expand-Archive $zip.FullName -DestinationPath lhm_tmp -Force
+          $exe = Get-ChildItem lhm_tmp -Recurse -Filter LibreHardwareMonitor.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force lhm | Out-Null
+          Copy-Item "$($exe.DirectoryName)\*" lhm -Recurse -Force
+          Get-ChildItem lhm | Select-Object -First 30 Name
+
       - name: Gerar .exe
-        run: >
-          pyinstaller --onefile --windowed --uac-admin
-          --name NexusPC
-          --add-binary "PresentMon.exe;."
-          nexus_pc.py
+        shell: pwsh
+        run: |
+          $a = @('--onefile','--windowed','--uac-admin','--name','NexusPC','--add-binary','PresentMon.exe;.')
+          if (Test-Path 'lhm\LibreHardwareMonitor.exe') { $a += @('--add-data','lhm;lhm'); Write-Host 'Embutindo LibreHardwareMonitor' }
+          else { Write-Host 'LibreHardwareMonitor NAO embutido' }
+          $a += 'nexus_pc.py'
+          pyinstaller @a
 
       - name: Gerar instalador (Inno Setup)
         continue-on-error: true

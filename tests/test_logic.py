@@ -138,3 +138,41 @@ def test_historico_e_desempenho():
 
 def test_versoes():
     assert up._versao("v2.1.0") > up._versao("1.9.9") and up._versao("1.0.0") == up._versao("1.0.0")
+
+
+def test_lhm_interpreta_sensores_intel_amd_gpu_disco():
+    from nexus import lhm
+    linhas = [
+        {"Identifier": "/intelcpu/0/temperature/0", "SensorType": "Temperature", "Name": "Core #1", "Value": 55.0},
+        {"Identifier": "/intelcpu/0/temperature/5", "SensorType": "Temperature", "Name": "CPU Package", "Value": 62.0},
+        {"Identifier": "/intelcpu/0/power/0", "SensorType": "Power", "Name": "CPU Package", "Value": 35.5},
+        {"Identifier": "/gpu-nvidia/0/temperature/0", "SensorType": "Temperature", "Name": "GPU Core", "Value": 71.0},
+        {"Identifier": "/gpu-nvidia/0/load/0", "SensorType": "Load", "Name": "GPU Core", "Value": 88.0},
+        {"Identifier": "/nvme/0/temperature/0", "SensorType": "Temperature", "Name": "Temperature", "Value": 48.0},
+        {"Identifier": "/lpc/nct/0/fan/0", "SensorType": "Fan", "Name": "Fan #1", "Value": 1200.0},
+        {"Identifier": "/amdcpu/0/temperature/2", "SensorType": "Temperature", "Name": "Core (Tctl/Tdie)", "Value": None},
+    ]
+    r = lhm.interpretar(linhas)
+    assert r["cpu_temp"] == 62.0 and r["cpu_consumo"] == 35.5
+    assert r["gpu_temp"] == 71.0 and r["gpu_util"] == 88.0 and r["disco_temp"] == 48.0
+    assert r["ventoinhas"] == [("Fan #1", 1200.0)]
+
+
+def test_lhm_sem_prioridade_usa_maior_temperatura():
+    from nexus import lhm
+    linhas = [{"Identifier": "/amdcpu/0/temperature/1", "SensorType": "Temperature", "Name": "Core #1", "Value": 50.0},
+              {"Identifier": "/amdcpu/0/temperature/2", "SensorType": "Temperature", "Name": "Core #2", "Value": 58.0}]
+    assert lhm.interpretar(linhas)["cpu_temp"] == 58.0
+
+
+def test_diagnostico_orienta_sobre_sensor_ausente():
+    ctx = contexto(sensores="sem_pawnio")
+    ctx["amostras"] = [{"cpu": 10, "ram_pct": 40, "cpu_temp": None}] * 3
+    p = [x for x in dg.diagnosticar(ctx) if "indisponível" in x.titulo]
+    assert p and "PawnIO" in p[0].recomendacao
+
+
+def test_disco_quente():
+    ctx = contexto()
+    ctx["amostras"] = [{"cpu": 10, "ram_pct": 40, "cpu_temp": 50, "disco_temp": 72}] * 3
+    assert any("Disco com temperatura alta" in x.titulo for x in dg.diagnosticar(ctx))

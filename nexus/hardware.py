@@ -54,24 +54,22 @@ def resumo_gpu(g):
 
 # ----------------------------------------------------------------------- sensores
 _SENSORES_PS = r"""
-$o = [ordered]@{cpu_temp=$null; gpu_util=$null; fontes=@()}
+$o = [ordered]@{lhm=@(); acpi=$null; gpu_engine=$null}
 try {
-  $s = Get-CimInstance -Namespace root\LibreHardwareMonitor -ClassName Sensor -ErrorAction Stop
-  $t = $s | Where-Object { $_.SensorType -eq 'Temperature' -and $_.Name -match 'CPU (Package|Total)|Core \(Tctl|Tdie|Package' } | Select-Object -First 1
-  if ($t) { $o.cpu_temp = [double]$t.Value; $o.fontes += 'LibreHardwareMonitor' }
+  $o.lhm = @(Get-CimInstance -Namespace root\LibreHardwareMonitor -ClassName Sensor -ErrorAction Stop |
+     Where-Object { $_.SensorType -in 'Temperature','Power','Fan','Load','Clock','Control' } |
+     Select-Object Identifier,SensorType,Name,Value)
 } catch {}
-if ($o.cpu_temp -eq $null) {
-  try {
-    $z = Get-CimInstance -Namespace root\wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop
-    $m = ($z | ForEach-Object { $_.CurrentTemperature / 10 - 273.15 } | Measure-Object -Maximum).Maximum
-    if ($m -gt 0 -and $m -lt 130) { $o.cpu_temp = [math]::Round($m,1); $o.fontes += 'ACPI' }
-  } catch {}
-}
+try {
+  $z = Get-CimInstance -Namespace root\wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop
+  $m = ($z | ForEach-Object { $_.CurrentTemperature / 10 - 273.15 } | Measure-Object -Maximum).Maximum
+  if ($m -gt 0 -and $m -lt 130) { $o.acpi = [math]::Round($m,1) }
+} catch {}
 try {
   $c = (Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage' -ErrorAction Stop).CounterSamples
-  $o.gpu_util = [math]::Min(100, [math]::Round(($c | Measure-Object CookedValue -Sum).Sum,1))
+  $o.gpu_engine = [math]::Min(100, [math]::Round(($c | Measure-Object CookedValue -Sum).Sum,1))
 } catch {}
-$o | ConvertTo-Json -Compress
+ConvertTo-Json -InputObject $o -Compress -Depth 4
 """
 
 _NVSMI = ["nvidia-smi", "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,"
@@ -114,15 +112,32 @@ class Sensores:
     def atualizar_lento(self):
         d = ps_json(_SENSORES_PS, timeout=20, default=None)
         if d:
-            self.lento = d
+            self.lento = self._combinar(d)
         self.lento_t = time.time()
+
+    @staticmethod
+    def _combinar(d):
+        """Une LibreHardwareMonitor (preferido), ACPI e contador de GPU do Windows."""
+        from . import lhm
+        r = {"cpu_temp": None, "gpu_util": d.get("gpu_engine"), "fontes": []}
+        dados = lhm.interpretar(aslist(d.get("lhm"))) if d.get("lhm") else {}
+        if dados:
+            r.update(dados)
+            r["fontes"].append("LibreHardwareMonitor")
+        if r.get("cpu_temp") is None and d.get("acpi") is not None:
+            r["cpu_temp"] = d["acpi"]
+            r["fontes"].append("ACPI")
+        return r
 
     def amostra(self):
         s = {"cpu": 0.0, "cpu_freq": None, "ram_pct": 0.0, "ram_usada": 0, "ram_total": 0,
              "disco_leitura": 0.0, "disco_escrita": 0.0, "cpu_temp": self.lento.get("cpu_temp"),
              "gpu_util": self.lento.get("gpu_util"), "gpu_temp": None, "gpu_vram": None,
              "gpu_consumo": None, "gpu_freq": None, "gpu_fan": None, "gpu_nome": None,
-             "gpu_throttle": None, "fontes": self.lento.get("fontes", [])}
+             "gpu_throttle": None, "fontes": self.lento.get("fontes", []), "cpu_consumo": self.lento.get("cpu_consumo"),
+             "disco_temp": self.lento.get("disco_temp"), "ventoinhas": self.lento.get("ventoinhas")}
+        for k in ("gpu_temp", "gpu_consumo", "gpu_freq", "gpu_fan"):
+            s[k] = self.lento.get(k)
         if psutil:
             s["cpu"] = psutil.cpu_percent(None)
             f = psutil.cpu_freq()

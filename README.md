@@ -33,7 +33,7 @@ Problemas confirmados descontam: crítico −35, alto −20, médio −10, baixo
 Hardware antigo **não** perde pontos por ser antigo.
 
 ## Limitações honestas
-- **Temperatura da CPU** no Windows exige um driver de sensores. Abra o [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) em segundo plano e o NEXUS PC lê sozinho. GPU NVIDIA é lida via `nvidia-smi`.
+- **Temperatura da CPU:** o NEXUS PC traz o [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) embutido (aberto oculto). A maioria dos processadores só informa a temperatura com o driver **PawnIO**, de terceiros: em Configurações > Sensores há um botão que o instala via winget, **só se você aprovar**. GPU NVIDIA é lida via `nvidia-smi`. Veja `THIRD_PARTY.md`.
 - **Drivers:** a comparação com versões "oficiais" é feita contra o Windows Update. Para placa de vídeo, o app abre o site do fabricante; ele não baixa drivers de fontes não oficiais.
 - Nada foi testado em todas as combinações de hardware. Use o ponto de restauração.
 

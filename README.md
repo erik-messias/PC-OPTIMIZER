@@ -8,6 +8,7 @@ App com interface gráfica que:
 - otimiza **todos os discos** (`defrag /O`: desfragmenta HDD, faz TRIM em SSD)
 - cria um **ponto de restauração** antes de mexer em qualquer coisa
 - mede **pontos (0–1000) antes e depois** e salva um relatório em `%APPDATA%\OtimizadorPC`
+- botão **Drivers**: lê o hardware (CPU, placa-mãe, vídeo, rede, áudio), aponta dispositivos sem driver e instala os drivers pendentes pelo **Windows Update** (assinados pela Microsoft); para a placa de vídeo, detecta NVIDIA/AMD/Intel e abre a página oficial
 - tem um **contador de FPS** (overlay sempre no topo, via [PresentMon](https://github.com/GameTechDev/PresentMon)); arraste com o mouse, duplo clique fecha
 
 ## Baixar

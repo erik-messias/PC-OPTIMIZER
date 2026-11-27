@@ -453,6 +453,141 @@ class FpsOverlay:
         self.win.destroy()
 
 
+# -------------------------------------------------------------------- drivers
+def _ps(script, timeout=600):
+    return run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+               timeout=timeout)
+
+
+def ler_hardware():
+    """Lê os componentes do PC. Retorna dict com listas de textos."""
+    script = r"""
+$o = [ordered]@{}
+$o.cpu   = @(Get-CimInstance Win32_Processor | ForEach-Object { $_.Name.Trim() })
+$o.placa = @(Get-CimInstance Win32_BaseBoard | ForEach-Object { "$($_.Manufacturer) $($_.Product)" })
+$o.gpu   = @(Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name)|$($_.DriverVersion)|$($_.DriverDate)" })
+$o.rede  = @(Get-CimInstance Win32_NetworkAdapter | Where-Object { $_.PhysicalAdapter } | ForEach-Object { $_.Name })
+$o.audio = @(Get-CimInstance Win32_SoundDevice | ForEach-Object { $_.Name })
+$o.erros = @(Get-CimInstance Win32_PnPEntity | Where-Object { $_.ConfigManagerErrorCode -ne 0 } |
+             ForEach-Object { "$($_.Name)|$($_.ConfigManagerErrorCode)|$($_.DeviceID)" })
+$o | ConvertTo-Json -Compress -Depth 3
+"""
+    cod, saida = _ps(script, timeout=120)
+    try:
+        ini = saida.index("{")
+        d = json.loads(saida[ini:saida.rindex("}") + 1])
+    except ValueError:
+        return {}
+    for k, v in d.items():
+        if isinstance(v, str):
+            d[k] = [v]
+        elif v is None:
+            d[k] = []
+    return d
+
+
+SITES_GPU = {
+    "nvidia": ("NVIDIA", "https://www.nvidia.com/Download/index.aspx"),
+    "geforce": ("NVIDIA", "https://www.nvidia.com/Download/index.aspx"),
+    "amd": ("AMD", "https://www.amd.com/en/support/download/drivers.html"),
+    "radeon": ("AMD", "https://www.amd.com/en/support/download/drivers.html"),
+    "intel": ("Intel", "https://www.intel.com.br/content/www/br/pt/download-center/home.html"),
+}
+
+
+def marca_gpu(nome):
+    baixo = nome.lower()
+    for chave, v in SITES_GPU.items():
+        if chave in baixo:
+            return v
+    return None
+
+
+def buscar_drivers_windows_update(log):
+    """Procura drivers pendentes no Windows Update. Retorna lista de títulos."""
+    script = r"""
+$s = New-Object -ComObject Microsoft.Update.Session
+$r = $s.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver'")
+$r.Updates | ForEach-Object { $_.Title }
+"""
+    cod, saida = _ps(script, timeout=900)
+    itens = [l.strip() for l in saida.splitlines() if l.strip()]
+    if cod != 0 and not itens:
+        log(f"Windows Update falhou: {saida.strip()[:150]}")
+    return itens
+
+
+def instalar_drivers_windows_update(log):
+    """Baixa e instala TODOS os drivers pendentes do Windows Update (assinados pela Microsoft)."""
+    script = r"""
+$s = New-Object -ComObject Microsoft.Update.Session
+$r = $s.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver'")
+if ($r.Updates.Count -eq 0) { 'NENHUM'; exit }
+$col = New-Object -ComObject Microsoft.Update.UpdateColl
+foreach ($u in $r.Updates) { if (-not $u.EulaAccepted) { $u.AcceptEula() }; [void]$col.Add($u) }
+$d = $s.CreateUpdateDownloader(); $d.Updates = $col; [void]$d.Download()
+$i = $s.CreateUpdateInstaller();  $i.Updates = $col
+$res = $i.Install()
+"OK|$($col.Count)|$($res.ResultCode)|$($res.RebootRequired)"
+"""
+    log("Baixando e instalando drivers (pode levar vários minutos)...")
+    cod, saida = _ps(script, timeout=3600)
+    if "NENHUM" in saida:
+        log("Drivers: nenhum pendente, tudo atualizado pelo Windows Update")
+        return 0
+    for linha in saida.splitlines():
+        if linha.startswith("OK|"):
+            _, n, res, reboot = linha.split("|")
+            log(f"Drivers: {n} processados (código {res}; 2 = sucesso)")
+            if reboot.strip().lower() == "true":
+                log("É preciso REINICIAR o PC para concluir os drivers.")
+            return int(n)
+    log(f"Drivers: falhou: {saida.strip()[:200]}")
+    return 0
+
+
+def verificar_drivers(log, instalar=False):
+    """Lê o hardware, mostra o que achou e (opcional) instala drivers."""
+    log("Lendo hardware do PC...")
+    hw = ler_hardware()
+    if not hw:
+        log("Não consegui ler o hardware.")
+        return
+    rotulos = [("cpu", "Processador"), ("placa", "Placa-mãe"), ("rede", "Rede"), ("audio", "Áudio")]
+    for chave, nome in rotulos:
+        for item in hw.get(chave, []):
+            log(f"  {nome}: {item}")
+    gpus = []
+    for g in hw.get("gpu", []):
+        nome, ver, data = (g.split("|") + ["", ""])[:3]
+        gpus.append(nome)
+        log(f"  Vídeo: {nome} (driver {ver or '?'})")
+    for e in hw.get("erros", []):
+        nome, codigo, _ = (e.split("|") + ["", ""])[:3]
+        log(f"  PROBLEMA: {nome or 'dispositivo desconhecido'} (erro {codigo}) - sem driver ou com falha")
+    if not hw.get("erros"):
+        log("  Nenhum dispositivo com driver faltando.")
+
+    log("Procurando drivers no Windows Update...")
+    pend = buscar_drivers_windows_update(log)
+    if pend:
+        log(f"{len(pend)} driver(s) disponível(is):")
+        for t in pend:
+            log(f"   - {t}")
+    else:
+        log("Nenhum driver pendente no Windows Update.")
+
+    if instalar and pend:
+        instalar_drivers_windows_update(log)
+
+    # Vídeo: o melhor driver vem do fabricante
+    for nome in gpus:
+        m = marca_gpu(nome)
+        if m:
+            log(f"Placa de vídeo {m[0]}: o driver mais novo fica em {m[1]}")
+    return gpus
+
+
 # ----------------------------------------------------------------------- app
 class App(tk.Tk):
     def __init__(self):
@@ -502,6 +637,7 @@ class App(tk.Tk):
         ttk.Button(bt, text="📊 Só medir pontos", command=self.so_medir).pack(side="left", padx=6)
         ttk.Button(bt, text="🎮 Contador de FPS", command=self.fps).pack(side="left")
         ttk.Button(bt, text="📁 Abrir relatórios", command=self.abrir_pasta).pack(side="left", padx=6)
+        ttk.Button(bt, text="🔧 Drivers", command=self.drivers).pack(side="left")
 
         self.barra = ttk.Progressbar(self, mode="indeterminate")
         self.barra.pack(fill="x", padx=10)
@@ -584,6 +720,32 @@ class App(tk.Tk):
         if self.overlay and self.overlay.rodando:
             return
         self.overlay = FpsOverlay(self)
+
+    def drivers(self):
+        r = messagebox.askyesnocancel(
+            APP, "Verificar drivers do PC.\n\nSIM = ler hardware, achar e INSTALAR drivers\n"
+                 "NÃO = só ler e listar (não instala nada)\nCANCELAR = sair")
+        if r is None:
+            return
+        instalar = bool(r)
+
+        def t():
+            if instalar:
+                criar_ponto_restauracao(self.log)
+            gpus = verificar_drivers(self.log, instalar=instalar)
+            self.after(0, lambda: self._oferecer_gpu(gpus or []))
+        self._rodar(t)
+
+    def _oferecer_gpu(self, gpus):
+        import webbrowser
+        vistos = set()
+        for nome in gpus:
+            m = marca_gpu(nome)
+            if m and m[0] not in vistos:
+                vistos.add(m[0])
+                if messagebox.askyesno(APP, f"Abrir a página oficial de drivers {m[0]} "
+                                            f"para a placa de vídeo?\n\n{nome}"):
+                    webbrowser.open(m[1])
 
     def abrir_pasta(self):
         PASTA_DADOS.mkdir(parents=True, exist_ok=True)

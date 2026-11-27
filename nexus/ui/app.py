@@ -11,6 +11,7 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from .. import cleaning, diagnostics as dg, drivers as drv, hardware as hw, optimize as opt
+from .. import repair as rp, startup as st
 from ..core import (APP, HIST, IS_WIN, PASTA, PASTA_REL, VERSAO, carregar_config, fmt_bytes, is_admin, log,
                     plano_ativo, salvar_config)
 from . import theme as T
@@ -524,20 +525,45 @@ class GameBoost(Pagina):
 class WorkBoost(Pagina):
     def __init__(self, app):
         super().__init__(app)
-        titulo_pagina(self, "Work Boost", "Identifica o que mais consome recursos para melhorar a produtividade "
-                      "(navegador com muitas abas, edição, programação, multitarefa).")
+        titulo_pagina(self, "Work Boost", "Perfis para trabalho. O plano de energia é trocado (reversível no Histórico) "
+                      "e você recebe recomendações para o seu hardware e para o que está aberto agora.")
         r = linha_botoes(self)
-        Botao(r, "Aplicar plano Equilibrado", lambda: messagebox.showinfo(APP, opt.aplicar_perfil("equilibrado")[1]), "primario").pack(side="left")
-        c = Cartao(self, "Maiores consumidores de memória")
-        c.pack(fill="both", expand=True, padx=26, pady=8)
-        self.proc = PainelProcessos(c.corpo, app)
+        for chave, p in opt.WORK_PERFIS.items():
+            Botao(r, p["curto"], lambda c=chave: self.perfil(c), "primario" if chave == "escritorio" else "sec").pack(side="left", padx=(0, 6))
+        self.estado = tk.Label(self, text="Escolha o tipo de trabalho.", bg=T.BG, fg=T.CIANO, font=T.fonte(10, True))
+        self.estado.pack(anchor="w", padx=26)
+        corpo = tk.Frame(self, bg=T.BG)
+        corpo.pack(fill="both", expand=True, padx=26, pady=8)
+        esq = Cartao(corpo, "Maiores consumidores de memória")
+        esq.pack(side="left", fill="both", expand=True)
+        self.proc = PainelProcessos(esq.corpo, app)
         self.proc.pack(fill="both", expand=True)
-        tk.Label(self, text="Dica: se o navegador aparecer várias vezes no topo, feche abas ou use a suspensão de abas. "
-                 "Perfis automáticos por tipo de trabalho chegam na Fase 4.", bg=T.BG, fg=T.MUDO, font=T.fonte(9),
-                 wraplength=900, justify="left").pack(anchor="w", padx=26, pady=(0, 14))
+        dir_ = Cartao(corpo, "Recomendações", T.ROXO)
+        dir_.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        f, self.dicas = texto_rolavel(dir_.corpo, 10, mono=False)
+        f.pack(fill="both", expand=True)
+        self.chave = None
 
     def on_show(self):
         self.proc.atualizar()
+        self.mostrar()
+
+    def mostrar(self):
+        self.dicas.delete("1.0", "end")
+        if not self.chave:
+            self.dicas.insert("end", "Selecione um perfil acima.")
+            return
+        inv = self.app.ctx["inv"] if self.app.ctx else {}
+        for d in opt.dicas_trabalho(self.chave, inv, hw.top_processos(6)):
+            self.dicas.insert("end", "• " + d + "\n\n")
+        if not self.app.ctx:
+            self.dicas.insert("end", "(Faça a Análise completa para recomendações mais precisas.)")
+
+    def perfil(self, chave):
+        self.chave = chave
+        ok, m = opt.aplicar_work(chave)
+        self.estado.config(text=f"{opt.WORK_PERFIS[chave]['nome']}: {m}", fg=T.CIANO if ok else T.VERMELHO)
+        self.mostrar()
 
 
 # ========================================================================== monitoramento
@@ -593,21 +619,77 @@ class Monitor(Pagina):
 class Reparo(Pagina):
     def __init__(self, app):
         super().__init__(app)
-        titulo_pagina(self, "Reparação do Windows", "Fase 5: integração com SFC, DISM e CHKDSK com explicação passo a passo.")
-        c = Cartao(self, "Em desenvolvimento", T.ROXO)
-        c.pack(fill="x", padx=26, pady=10)
-        tk.Label(c.corpo, bg=T.PANEL, fg=T.MUDO, font=T.fonte(10), justify="left", anchor="w", wraplength=900,
-                 text="Este módulo ainda não está disponível. Planejado para a Fase 5:\n\n"
-                      "• SFC — verifica e repara arquivos protegidos do Windows\n"
-                      "• DISM — verifica a imagem do Windows\n"
-                      "• CHKDSK — verifica o sistema de arquivos\n"
-                      "• Diagnóstico de memória e Visualizador de Eventos\n\n"
-                      "Nenhum reparo destrutivo será executado automaticamente.").pack(anchor="w")
-        r = tk.Frame(c.corpo, bg=T.PANEL)
-        r.pack(anchor="w", pady=10)
+        titulo_pagina(self, "Reparação do Windows", "Ferramentas oficiais do próprio Windows. Cada uma é explicada antes de rodar. "
+                      "Itens com ⚠ alteram o sistema e pedem confirmação. Exigem Administrador.")
+        corpo = tk.Frame(self, bg=T.BG)
+        corpo.pack(fill="both", expand=True, padx=26, pady=6)
+        esq = tk.Frame(corpo, bg=T.BG, width=330)
+        esq.pack(side="left", fill="y")
+        self.sel = tk.StringVar(value="sfc_verificar")
+        for chave, f in rp.FERRAMENTAS.items():
+            tk.Radiobutton(esq, text=f["nome"] + (" ⚠" if f["altera"] else ""), variable=self.sel, value=chave,
+                           command=self.descrever, bg=T.BG, fg=T.TEXTO, selectcolor=T.PANEL2, activebackground=T.BG,
+                           activeforeground=T.CIANO, font=T.fonte(10), anchor="w", justify="left", wraplength=320,
+                           highlightthickness=0, bd=0).pack(fill="x", pady=3)
+        self.desc = tk.Label(esq, text="", bg=T.PANEL, fg=T.MUDO, font=T.fonte(9), wraplength=310, justify="left",
+                             anchor="nw", padx=10, pady=8, highlightthickness=1, highlightbackground=T.BORDA)
+        self.desc.pack(fill="x", pady=8)
+        self.btn = Botao(esq, "▶ EXECUTAR", self.executar, "primario")
+        self.btn.pack(fill="x")
+        self.cancelar = False
+        Botao(esq, "Cancelar", lambda: setattr(self, "cancelar", True)).pack(fill="x", pady=(6, 14))
+        tk.Label(esq, text="Outras ferramentas", bg=T.BG, fg=T.CIANO, font=T.fonte(10, True)).pack(anchor="w")
         for nome, cmd in (("Visualizador de Eventos", "eventvwr.msc"), ("Diagnóstico de Memória", "mdsched.exe"),
-                          ("Windows Update", "ms-settings:windowsupdate")):
-            Botao(r, nome, lambda c=cmd: os.startfile(c) if IS_WIN else None).pack(side="left", padx=(0, 6))
+                          ("Windows Update", "ms-settings:windowsupdate"), ("Gerenciador de Dispositivos", "devmgmt.msc")):
+            Botao(esq, nome, lambda c=cmd: os.startfile(c) if IS_WIN else None).pack(fill="x", pady=2)
+        dir_ = tk.Frame(corpo, bg=T.BG)
+        dir_.pack(side="left", fill="both", expand=True, padx=(14, 0))
+        self.resultado = tk.Label(dir_, text="Escolha uma ferramenta e clique em Executar.", bg=T.BG, fg=T.MUDO,
+                                  font=T.fonte(11, True), anchor="w", justify="left", wraplength=620)
+        self.resultado.pack(fill="x")
+        f, self.txt = texto_rolavel(dir_, 18)
+        f.pack(fill="both", expand=True, pady=6)
+        self.ocupado = False
+        self.descrever()
+
+    def descrever(self):
+        f = rp.FERRAMENTAS[self.sel.get()]
+        self.desc.config(text=f"{f['desc']}\n\nTempo estimado: {f['tempo']}.")
+
+    def executar(self):
+        if self.ocupado:
+            return
+        chave = self.sel.get()
+        f = rp.FERRAMENTAS[chave]
+        if not IS_WIN:
+            messagebox.showinfo(APP, "Disponível somente no Windows.")
+            return
+        if not is_admin():
+            messagebox.showwarning(APP, "Execute o NEXUS PC como Administrador para usar esta ferramenta.")
+            return
+        if f["altera"] and not messagebox.askyesno(APP, f"{f['nome']}\n\n{f['desc']}\n\nDemora {f['tempo']}. Deseja continuar?"):
+            return
+        self.ocupado, self.cancelar = True, False
+        self.txt.delete("1.0", "end")
+        self.resultado.config(text="Executando... não feche o programa.", fg=T.CIANO)
+
+        def linha(t):
+            self.app.post(lambda: (self.txt.insert("end", t + "\n"), self.txt.see("end")))
+
+        def trabalho():
+            return rp.executar(chave, linha, lambda: self.cancelar)
+
+        def fim(res):
+            cod, texto = res
+            estado, msg = rp.interpretar(chave, cod, texto)
+            cor = {"ok": T.VERDE, "reparado": T.VERDE, "problema": T.AMARELO, "erro": T.VERMELHO}[estado]
+            self.resultado.config(text=msg, fg=cor)
+            self.ocupado = False
+
+        def erro(e):
+            self.resultado.config(text=f"Erro: {e}", fg=T.VERMELHO)
+            self.ocupado = False
+        self.app.bg(trabalho, fim, erro)
 
 
 # ================================================================================ limpeza
@@ -682,24 +764,63 @@ class Limpeza(Pagina):
 
 # ============================================================================ inicialização
 class Inicializacao(Pagina):
-    SUSPEITO = ("\\temp\\", "appdata\\local\\temp", "\\users\\public\\", "\\downloads\\")
+    REC = {"suspeito": ("SUSPEITO", "crítico"), "desativar": ("pode desativar", "médio"), "avaliar": ("avaliar", "baixo"),
+           "manter": ("manter", "ok"), "proteger": ("essencial", "ok")}
 
     def __init__(self, app):
         super().__init__(app)
         titulo_pagina(self, "Gerenciador de inicialização",
-                      "Programas que abrem junto com o Windows. Nesta versão a lista é somente leitura; "
-                      "desativar/reativar chega na Fase 4. Para desativar agora: Gerenciador de Tarefas > Inicializar.")
-        f, self.tv = arvore(self, [("n", "Nome"), ("o", "Origem"), ("c", "Comando"), ("a", "Alerta")], [180, 130, 520, 120], altura=14)
-        f.pack(fill="both", expand=True, padx=26, pady=8)
+                      "Programas que abrem junto com o Windows. Desativar é reversível e não apaga nada "
+                      "(é o mesmo mecanismo do Gerenciador de Tarefas).")
         r = linha_botoes(self)
+        Botao(r, "Desativar selecionado", lambda: self.alternar(False), "primario").pack(side="left")
+        Botao(r, "Reativar selecionado", lambda: self.alternar(True)).pack(side="left", padx=6)
         Botao(r, "↻ Atualizar", self.on_show).pack(side="left")
-        Botao(r, "Abrir Gerenciador de Tarefas", lambda: os.startfile("taskmgr") if IS_WIN else None).pack(side="left", padx=6)
+        self.msg = tk.Label(r, text="", bg=T.BG, fg=T.MUDO, font=T.fonte(9))
+        self.msg.pack(side="left", padx=10)
+        f, self.tv = arvore(self, [("e", "Estado"), ("n", "Nome"), ("f", "Fabricante"), ("r", "RAM agora"),
+                                   ("o", "Origem"), ("a", "Recomendação")], [100, 190, 170, 90, 130, 130], altura=13)
+        f.pack(fill="both", expand=True, padx=26, pady=6)
+        self.tv.bind("<<TreeviewSelect>>", self.detalhe)
+        self.det = tk.Label(self, text="", bg=T.PANEL, fg=T.MUDO, font=T.fonte(9), anchor="w", justify="left", wraplength=1000,
+                            padx=12, pady=8, highlightthickness=1, highlightbackground=T.BORDA)
+        self.det.pack(fill="x", padx=26, pady=(0, 14))
+        self.itens = []
 
     def on_show(self):
-        self.tv.delete(*self.tv.get_children())
-        for n, cmd, orig in hw.programas_inicializacao():
-            sus = any(s in cmd.lower() for s in self.SUSPEITO)
-            self.tv.insert("", "end", values=(n, orig, cmd, "SUSPEITO" if sus else ""), tags=("sus",) if sus else ())
+        self.msg.config(text="Lendo...", fg=T.CIANO)
+
+        def fim(itens):
+            self.itens = itens
+            self.tv.delete(*self.tv.get_children())
+            for i, it in enumerate(itens):
+                rot, tag = self.REC[it["rec"]]
+                self.tv.insert("", "end", iid=str(i), tags=(tag,) if it["habilitado"] else ("info",),
+                               values=("ATIVO" if it["habilitado"] else "desativado", it["nome"], it["fab"] or "—",
+                                       fmt_bytes(it["ram"]) if it["ram"] else "—", it["origem"], rot))
+            ativos = sum(1 for x in itens if x["habilitado"])
+            self.msg.config(text=f"{ativos} ativo(s) de {len(itens)}", fg=T.MUDO)
+        self.app.bg(st.listar, fim, lambda e: self.msg.config(text=f"Erro: {e}", fg=T.VERMELHO))
+
+    def detalhe(self, _):
+        sel = self.tv.selection()
+        if sel:
+            it = self.itens[int(sel[0])]
+            self.det.config(text=f"{it['motivo']}\nComando: {it['cmd']}")
+
+    def alternar(self, habilitar):
+        sel = self.tv.selection()
+        if not sel:
+            messagebox.showinfo(APP, "Selecione um programa na lista.")
+            return
+        it = self.itens[int(sel[0])]
+        if not habilitar and not messagebox.askyesno(APP, f"Desativar '{it['nome']}' na inicialização?\n\n{it['motivo']}\n\n"
+                                                         "Você pode reativar a qualquer momento."):
+            return
+        ok, m = st.alternar(it, habilitar)
+        self.msg.config(text=m, fg=T.VERDE if ok else T.VERMELHO)
+        if ok:
+            self.on_show()
 
 
 # ============================================================================== histórico

@@ -170,6 +170,10 @@ class Historico:
         elif tipo == "gpu_pref":
             cod, saida = ps(_ps_gpu_pref_restore(d["exe"], d.get("anterior")))
             ok = cod == 0
+        elif tipo == "startup":
+            from . import startup
+            ok, saida = startup.definir_estado(d["hive"], d["chave"], d["nome"], d["habilitar"])
+            cod = 0 if ok else 1
         else:
             return False, "Tipo de reversão desconhecido."
         if ok:

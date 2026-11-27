@@ -4,7 +4,7 @@ Sistema de diagnóstico, otimização e manutenção para **Windows 10/11**. Em 
 ele **analisa o computador antes**, explica o que está errado, diferencia **problema confirmado** de **suspeita**
 e só altera algo com a sua aprovação, registrando tudo e permitindo desfazer.
 
-## O que já funciona (Fases 1 a 3)
+## O que já funciona (Fases 1 a 5)
 
 | Módulo | O que faz |
 |---|---|
@@ -15,10 +15,12 @@ e só altera algo com a sua aprovação, registrando tudo e permitindo desfazer.
 | Monitoramento | Gráficos ao vivo: CPU, RAM, GPU, VRAM, temperaturas, disco |
 | Game Boost | 5 perfis de energia (reversíveis), dicas gráficas para o seu hardware, GPU de alto desempenho por jogo, contador de FPS |
 | Limpeza | Mostra tamanho, local e consequência de cada categoria antes de apagar |
-| Inicialização | Lista programas que abrem com o Windows e sinaliza entradas suspeitas (somente leitura) |
+| Inicialização | Lista programas com fabricante, RAM em uso e recomendação (manter / pode desativar / suspeito). **Desativa e reativa** de forma reversível, sem apagar nada; itens de segurança do Windows são protegidos |
+| Work Boost | 6 perfis (navegação, imagens, vídeo, programação, escritório, multitarefa): plano de energia reversível + recomendações pelo seu hardware e pelos processos abertos |
+| Reparação | SFC, DISM e CHKDSK com explicação, saída ao vivo e resultado em linguagem simples. Verificações só leem; reparos pedem confirmação |
 | Histórico | Data, alteração, motivo, resultado e botão **Reverter** |
 
-**Em breve:** Work Boost com perfis, Reparação (SFC/DISM/CHKDSK), desativar itens de inicialização, atualizador automático.
+**Em breve:** perfis personalizados, relatórios de histórico de desempenho, instalador e atualizador automático.
 
 ## Como a nota é calculada
 Cada categoria (Hardware, Drivers, Windows, Temperaturas, Inicialização, Armazenamento) começa em 100.

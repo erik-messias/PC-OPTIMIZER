@@ -15,6 +15,7 @@ class FpsOverlay:
         self.quadros = {}
         self.lock = threading.Lock()
         self.rodando = True
+        self.fps_atual = 0
         self.win = tk.Toplevel(master)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
@@ -81,6 +82,7 @@ class FpsOverlay:
                 lst[:] = [(t, f) for t, f in lst if agora - t <= 1.0]
                 if len(lst) > n:
                     melhor, n = app, len(lst)
+        self.fps_atual = n if melhor else 0
         if melhor and n:
             self.lbl.config(text=f"FPS {n}", fg="#00ff66" if n >= 55 else "#ffcc00" if n >= 30 else "#ff4444")
             self.sub.config(text=melhor)

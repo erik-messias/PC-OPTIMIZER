@@ -12,7 +12,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 APP = "NEXUS PC"
-VERSAO = "2.0.0"
+VERSAO = "2.1.0"
 IS_WIN = platform.system() == "Windows"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -104,7 +104,7 @@ def recurso(nome):
 
 # ---------------------------------------------------------------- configurações
 _CONF = PASTA / "config.json"
-PADRAO = {"restauracao_auto": True, "limpar_navegadores": False, "intervalo_monitor_s": 1}
+PADRAO = {"restauracao_auto": True, "limpar_navegadores": False, "intervalo_monitor_s": 1, "perfis_custom": []}
 
 
 def carregar_config():
@@ -131,6 +131,10 @@ class Historico:
             c.execute("""CREATE TABLE IF NOT EXISTS historico(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, acao TEXT, motivo TEXT,
                 resultado TEXT, reversivel INTEGER, desfazer TEXT, revertido INTEGER DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS desempenho(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, geral INTEGER, notas TEXT, problemas INTEGER)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS sessoes(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, nome TEXT, duracao INTEGER, resumo TEXT)""")
 
     def _con(self):
         return sqlite3.connect(self.arq)
@@ -149,6 +153,29 @@ class Historico:
         with self._con() as c:
             return c.execute("SELECT id,data,acao,motivo,resultado,reversivel,revertido,desfazer "
                              "FROM historico ORDER BY id DESC LIMIT ?", (limite,)).fetchall()
+
+    # ---- histórico de desempenho
+    def registrar_desempenho(self, geral, notas, n_problemas):
+        with self._con() as c:
+            c.execute("INSERT INTO desempenho(data,geral,notas,problemas) VALUES(?,?,?,?)",
+                      (datetime.now().isoformat(timespec="seconds"), geral, json.dumps(notas), n_problemas))
+
+    def listar_desempenho(self, limite=60):
+        """Mais antigo primeiro: [(data, geral, {categoria: nota}, problemas)]"""
+        with self._con() as c:
+            rows = c.execute("SELECT data,geral,notas,problemas FROM desempenho ORDER BY id DESC LIMIT ?",
+                             (limite,)).fetchall()
+        return [(d, g, json.loads(n), p) for d, g, n, p in reversed(rows)]
+
+    def registrar_sessao(self, nome, duracao, resumo):
+        with self._con() as c:
+            c.execute("INSERT INTO sessoes(data,nome,duracao,resumo) VALUES(?,?,?,?)",
+                      (datetime.now().isoformat(timespec="seconds"), nome, int(duracao), json.dumps(resumo)))
+
+    def listar_sessoes(self, limite=30):
+        with self._con() as c:
+            rows = c.execute("SELECT data,nome,duracao,resumo FROM sessoes ORDER BY id DESC LIMIT ?", (limite,)).fetchall()
+        return [(d, n, du, json.loads(r)) for d, n, du, r in rows]
 
     def marcar_revertido(self, id_):
         with self._con() as c:

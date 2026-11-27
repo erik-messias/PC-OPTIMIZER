@@ -20,6 +20,11 @@ class Botao(tk.Label):
         self.bind("<Leave>", lambda e: self.config(bg=self._bg))
         self.bind("<Button-1>", lambda e: self._ativo and self._cmd and self._cmd())
 
+    def marcar(self, ativo):
+        """Destaca o botão (usado em abas)."""
+        self._bg, self._fg, self._hover = ((T.CIANO, "#06222a", "#67e8f9") if ativo else (T.PANEL2, T.TEXTO, "#1c2434"))
+        self.config(bg=self._bg, fg=self._fg)
+
     def ativar(self, sim):
         self._ativo = sim
         self.config(fg=self._fg if sim else T.MUDO, cursor="hand2" if sim else "arrow")

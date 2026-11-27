@@ -11,7 +11,7 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from .. import cleaning, diagnostics as dg, drivers as drv, hardware as hw, optimize as opt
-from .. import repair as rp, startup as st
+from .. import repair as rp, startup as st, bottleneck as bn, relatorio as rel, update as up
 from ..core import (APP, HIST, IS_WIN, PASTA, PASTA_REL, VERSAO, carregar_config, fmt_bytes, is_admin, log,
                     plano_ativo, salvar_config)
 from . import theme as T
@@ -189,6 +189,7 @@ class Analise(Pagina):
         self.btn_diag.pack(side="left", padx=8)
         self.btn_rel = Botao(r, "Abrir relatórios", lambda: os.startfile(PASTA_REL) if IS_WIN else None)
         self.btn_rel.pack(side="left")
+        Botao(r, "Relatório HTML", app.exportar_html).pack(side="left", padx=8)
         self.pct = tk.Label(self, text="0%", bg=T.BG, fg=T.CIANO, font=T.fonte(26, True))
         self.pct.pack(anchor="w", padx=26)
         self.barra = barra_progresso(self)
@@ -240,6 +241,7 @@ class Analise(Pagina):
             self.escrever(f"\n{len(probs)} problema(s) encontrado(s)."
                           + (f"\nRelatório salvo em: {arq}" if arq else ""))
             HIST.registrar("Análise completa", "Solicitada pelo usuário", f"Nota {geral}/100, {len(probs)} problemas")
+            HIST.registrar_desempenho(geral, {c: notas[c][0] for c in dg.CATEGORIAS}, len(probs))
             self.btn.ativar(True)
             self.ocupado = False
 
@@ -256,6 +258,7 @@ class Diagnostico(Pagina):
         super().__init__(app)
         titulo_pagina(self, "Diagnóstico inteligente",
                       "Cada problema mostra se é CONFIRMADO (há evidência) ou SUSPEITA (indício), com causas e correção.")
+        Botao(linha_botoes(self), "Exportar relatório HTML", app.exportar_html).pack(side="left")
         corpo = tk.Frame(self, bg=T.BG)
         corpo.pack(fill="both", expand=True, padx=26, pady=6)
         esq = tk.Frame(corpo, bg=T.BG)
@@ -485,6 +488,7 @@ class GameBoost(Pagina):
         r2 = linha_botoes(self)
         Botao(r2, "🎮 Contador de FPS", self.fps).pack(side="left")
         Botao(r2, "Usar GPU potente em um jogo…", self.gpu).pack(side="left", padx=6)
+        Botao(r2, "★ Meus perfis…", lambda: DialogoPerfis(app)).pack(side="left")
         self.overlay = None
         self.perfil_atual = "equilibrado"
 
@@ -590,9 +594,34 @@ class Monitor(Pagina):
         for c in range(3):
             g.columnconfigure(c, weight=1)
         self.info = tk.Label(self, text="", bg=T.BG, fg=T.MUDO, font=T.fonte(9), justify="left", anchor="w", wraplength=1000)
-        self.info.pack(fill="x", padx=26, pady=(0, 12))
+        self.info.pack(fill="x", padx=26, pady=(0, 4))
+        r = linha_botoes(self)
+        self.btn_rec = Botao(r, "● Gravar sessão", self.alternar_gravacao, "primario")
+        self.btn_rec.pack(side="left")
+        self.rec_lbl = tk.Label(r, text="Grave enquanto joga ou trabalha para descobrir o que limita o desempenho.",
+                                bg=T.BG, fg=T.MUDO, font=T.fonte(9))
+        self.rec_lbl.pack(side="left", padx=10)
+
+    def alternar_gravacao(self):
+        g = self.app.gravador
+        if not g.ativo:
+            g.iniciar()
+            self.btn_rec.config(text="■ Parar e analisar")
+            self.rec_lbl.config(text="Gravando... pode minimizar o NEXUS PC e jogar.", fg=T.VERMELHO)
+            return
+        dur = g.parar()
+        self.btn_rec.config(text="● Gravar sessão")
+        r, achados = bn.analisar(g.amostras)
+        texto = bn.texto(r, achados, dur)
+        HIST.registrar_sessao("Sessão gravada", dur, {"resumo": r, "achados": [list(a) for a in achados]})
+        HIST.registrar("Sessão analisada", f"{dur / 60:.1f} min", f"{len(achados)} achado(s)")
+        self.rec_lbl.config(text="Sessão salva no Histórico > Desempenho.", fg=T.VERDE)
+        self.app.janela_texto("Análise de gargalos da sessão", texto)
 
     def on_sample(self, s):
+        g = self.app.gravador
+        if g.ativo:
+            self.rec_lbl.config(text=f"● Gravando {g.duracao:.0f}s ({len(g.amostras)} amostras)", fg=T.VERMELHO)
         vram = None
         if s.get("gpu_vram") and s["gpu_vram"][1]:
             vram = s["gpu_vram"][0] / s["gpu_vram"][1] * 100
@@ -611,8 +640,8 @@ class Monitor(Pagina):
         if s.get("gpu_fan") is not None:
             extra.append(f"ventoinha GPU {s['gpu_fan']:.0f}%")
         fontes = ", ".join(s.get("fontes") or []) or "nenhuma (CPU sem sensor disponível)"
-        self.info.config(text=f"Threads lógicas: {n} • RAM {fmt_bytes(s['ram_usada'])} / {fmt_bytes(s['ram_total'])} • "
-                              + " • ".join(extra) + f"\nFonte de temperatura da CPU: {fontes}")
+        partes = [f"Threads lógicas: {n}", f"RAM {fmt_bytes(s['ram_usada'])} / {fmt_bytes(s['ram_total'])}"] + extra
+        self.info.config(text=" • ".join(partes) + f"\nFonte de temperatura da CPU: {fontes}")
 
 
 # ============================================================================= reparação
@@ -827,19 +856,64 @@ class Inicializacao(Pagina):
 class Historico(Pagina):
     def __init__(self, app):
         super().__init__(app)
-        titulo_pagina(self, "Histórico de otimizações", "Tudo o que o NEXUS PC alterou, com data, motivo e resultado.")
-        f, self.tv = arvore(self, [("i", "#"), ("d", "Data"), ("a", "Alteração"), ("m", "Motivo"), ("r", "Resultado"), ("v", "Reversível")],
+        titulo_pagina(self, "Histórico", "Alterações feitas pelo NEXUS PC (reversíveis) e a evolução do desempenho do seu computador.")
+        r = linha_botoes(self)
+        self.b1 = Botao(r, "Alterações", lambda: self.modo("alt"), "primario")
+        self.b1.pack(side="left")
+        self.b2 = Botao(r, "Desempenho", lambda: self.modo("des"))
+        self.b2.pack(side="left", padx=6)
+        # --- alterações
+        self.f_alt = tk.Frame(self, bg=T.BG)
+        f, self.tv = arvore(self.f_alt, [("i", "#"), ("d", "Data"), ("a", "Alteração"), ("m", "Motivo"), ("r", "Resultado"), ("v", "Reversível")],
                             [40, 140, 170, 260, 260, 90], altura=15)
         f.pack(fill="both", expand=True, padx=26, pady=8)
-        r = linha_botoes(self)
-        Botao(r, "↶ Reverter selecionado", self.reverter, "primario").pack(side="left")
-        Botao(r, "Abrir pasta de logs", lambda: os.startfile(PASTA) if IS_WIN else None).pack(side="left", padx=6)
+        r2 = tk.Frame(self.f_alt, bg=T.BG)
+        r2.pack(fill="x", padx=26)
+        Botao(r2, "↶ Reverter selecionado", self.reverter, "primario").pack(side="left")
+        Botao(r2, "Abrir pasta de logs", lambda: os.startfile(PASTA) if IS_WIN else None).pack(side="left", padx=6)
+        # --- desempenho
+        self.f_des = tk.Frame(self, bg=T.BG)
+        c = Cartao(self.f_des, "Evolução da nota de saúde (0-100)")
+        c.pack(fill="x", padx=26, pady=8)
+        self.graf = Grafico(c.corpo, T.CIANO, 100, "", pontos=30, altura=110)
+        self.graf.pack(fill="x")
+        self.resumo = tk.Label(c.corpo, text="", bg=T.PANEL, fg=T.MUDO, font=T.fonte(9), anchor="w")
+        self.resumo.pack(fill="x")
+        f2, self.tv2 = arvore(self.f_des, [("d", "Data"), ("t", "Tipo"), ("n", "Resultado")], [165, 150, 600], altura=9)
+        f2.pack(fill="both", expand=True, padx=26, pady=4)
+        self.modo("alt")
+
+    def modo(self, m):
+        self.f_alt.pack_forget()
+        self.f_des.pack_forget()
+        (self.f_alt if m == "alt" else self.f_des).pack(fill="both", expand=True)
+        self.b1.marcar(m == "alt")
+        self.b2.marcar(m == "des")
 
     def on_show(self):
         self.tv.delete(*self.tv.get_children())
         for id_, data, acao, motivo, res, rev, revertido, _ in HIST.listar():
             estado = "revertido" if revertido else ("sim" if rev else "não")
             self.tv.insert("", "end", iid=str(id_), values=(id_, data.replace("T", " "), acao, motivo, res, estado))
+        self.tv2.delete(*self.tv2.get_children())
+        analises = HIST.listar_desempenho(30)
+        self.graf.dados.clear()
+        self.graf.dados.extend([None] * (30 - len(analises)) + [a[1] for a in analises])
+        self.graf._desenhar()
+        if len(analises) >= 2:
+            dif = analises[-1][1] - analises[0][1]
+            self.resumo.config(text=f"{len(analises)} análises • primeira {analises[0][1]} → última {analises[-1][1]} ({dif:+d})")
+        else:
+            self.resumo.config(text="Faça análises completas ao longo do tempo para ver a evolução.")
+        linhas = [(d, "Análise completa", f"Nota {g}/100 • {p} problema(s) • " + ", ".join(f"{k} {v}" for k, v in n.items()))
+                  for d, g, n, p in analises]
+        for d, nome, dur, res in HIST.listar_sessoes(15):
+            r = res.get("resumo", {})
+            fmtv = lambda v: "N/D" if v is None else f"{v:.0f}%"  # noqa: E731
+            linhas.append((d, "Sessão gravada", f"{dur / 60:.1f} min • CPU {fmtv(r.get('cpu_med'))} • GPU {fmtv(r.get('gpu_med'))} • "
+                           + "; ".join(a[0] for a in res.get("achados", [])[:2])))
+        for d, t, n in sorted(linhas, reverse=True):
+            self.tv2.insert("", "end", values=(d.replace("T", " "), t, n))
 
     def reverter(self):
         sel = self.tv.selection()
@@ -848,6 +922,115 @@ class Historico(Pagina):
         ok, m = HIST.reverter(int(sel[0]))
         messagebox.showinfo(APP, m)
         self.on_show()
+
+
+class DialogoPerfis(tk.Toplevel):
+    """Perfis personalizados: plano de energia + lista de programas que você costuma fechar."""
+    PLANOS = {"Máximo desempenho": "maximo", "Equilibrado": "equilibrado", "Economia de energia": "economia"}
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title("Meus perfis")
+        self.configure(bg=T.BG)
+        self.geometry("620x470")
+        self.cfg = carregar_config()
+        tk.Label(self, text="Meus perfis", bg=T.BG, fg=T.TEXTO, font=T.fonte(16, True)).pack(anchor="w", padx=18, pady=(14, 0))
+        tk.Label(self, text="Ao aplicar, troca o plano de energia (reversível) e oferece fechar os programas listados.",
+                 bg=T.BG, fg=T.MUDO, font=T.fonte(9)).pack(anchor="w", padx=18)
+        corpo = tk.Frame(self, bg=T.BG)
+        corpo.pack(fill="both", expand=True, padx=18, pady=10)
+        self.lista = tk.Listbox(corpo, bg=T.PANEL, fg=T.TEXTO, selectbackground="#1d3557", relief="flat", highlightthickness=1,
+                                highlightbackground=T.BORDA, width=20, font=T.fonte(10), exportselection=False)
+        self.lista.pack(side="left", fill="y")
+        self.lista.bind("<<ListboxSelect>>", self.carregar)
+        dir_ = tk.Frame(corpo, bg=T.BG)
+        dir_.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        tk.Label(dir_, text="Nome", bg=T.BG, fg=T.CIANO, font=T.fonte(9, True)).pack(anchor="w")
+        self.nome = tk.Entry(dir_, bg=T.PANEL2, fg=T.TEXTO, insertbackground=T.CIANO, relief="flat", font=T.fonte(10))
+        self.nome.pack(fill="x", ipady=4)
+        tk.Label(dir_, text="Plano de energia", bg=T.BG, fg=T.CIANO, font=T.fonte(9, True)).pack(anchor="w", pady=(8, 0))
+        self.plano = ttk.Combobox(dir_, values=list(self.PLANOS), state="readonly")
+        self.plano.set("Equilibrado")
+        self.plano.pack(fill="x")
+        tk.Label(dir_, text="Programas para fechar (um por linha, ex.: chrome.exe)", bg=T.BG, fg=T.CIANO,
+                 font=T.fonte(9, True)).pack(anchor="w", pady=(8, 0))
+        self.procs = tk.Text(dir_, height=8, bg=T.PANEL2, fg=T.TEXTO, insertbackground=T.CIANO, relief="flat", font=T.fonte(10, mono=True))
+        self.procs.pack(fill="both", expand=True)
+        r = tk.Frame(self, bg=T.BG)
+        r.pack(fill="x", padx=18, pady=(0, 14))
+        Botao(r, "Novo", self.novo).pack(side="left")
+        Botao(r, "Salvar", self.salvar, "primario").pack(side="left", padx=6)
+        Botao(r, "Aplicar", self.aplicar).pack(side="left")
+        Botao(r, "Excluir", self.excluir, "perigo").pack(side="left", padx=6)
+        self.atualizar()
+
+    def atualizar(self):
+        self.lista.delete(0, "end")
+        for p in self.cfg["perfis_custom"]:
+            self.lista.insert("end", p["nome"])
+
+    def carregar(self, _=None):
+        sel = self.lista.curselection()
+        if not sel:
+            return
+        p = self.cfg["perfis_custom"][sel[0]]
+        self.nome.delete(0, "end")
+        self.nome.insert(0, p["nome"])
+        self.plano.set(next((k for k, v in self.PLANOS.items() if v == p["plano"]), "Equilibrado"))
+        self.procs.delete("1.0", "end")
+        self.procs.insert("end", "\n".join(p["fechar"]))
+
+    def novo(self):
+        self.lista.selection_clear(0, "end")
+        self.nome.delete(0, "end")
+        self.procs.delete("1.0", "end")
+
+    def _dados(self):
+        nome = self.nome.get().strip()
+        fechar = [x.strip() for x in self.procs.get("1.0", "end").splitlines() if x.strip()]
+        return {"nome": nome, "plano": self.PLANOS[self.plano.get()], "fechar": fechar}
+
+    def salvar(self):
+        d = self._dados()
+        if not d["nome"]:
+            messagebox.showinfo(APP, "Dê um nome ao perfil.", parent=self)
+            return
+        lst = self.cfg["perfis_custom"]
+        for i, p in enumerate(lst):
+            if p["nome"].lower() == d["nome"].lower():
+                lst[i] = d
+                break
+        else:
+            lst.append(d)
+        salvar_config(self.cfg)
+        self.atualizar()
+
+    def excluir(self):
+        sel = self.lista.curselection()
+        if sel:
+            del self.cfg["perfis_custom"][sel[0]]
+            salvar_config(self.cfg)
+            self.atualizar()
+            self.novo()
+
+    def aplicar(self):
+        d = self._dados()
+        ok, m = opt.aplicar_plano(d["plano"], f"Perfil personalizado '{d['nome'] or 'sem nome'}'")
+        achados = []
+        if hw.psutil and d["fechar"]:
+            alvo = {x.lower() for x in d["fechar"]}
+            for p in hw.psutil.process_iter(["name", "pid"]):
+                try:
+                    if (p.info["name"] or "").lower() in alvo:
+                        achados.append((p.info["name"], p.info["pid"]))
+                except hw.psutil.Error:
+                    continue
+        if achados and messagebox.askyesno(APP, "Encerrar estes programas?\n\n" + "\n".join(sorted({n for n, _ in achados})) +
+                                           "\n\nTrabalho não salvo neles será perdido.", parent=self):
+            for n, pid in achados:
+                opt.encerrar_processo(pid, n)
+        messagebox.showinfo(APP, m, parent=self)
 
 
 # ============================================================================= configurações
@@ -864,11 +1047,27 @@ class Config(Pagina):
                      (self.v2, "Já autorizei a limpeza de cache de navegadores")):
             tk.Checkbutton(c.corpo, text=t, variable=v, command=self.salvar, bg=T.PANEL, fg=T.TEXTO, selectcolor=T.PANEL2,
                            activebackground=T.PANEL, activeforeground=T.TEXTO, font=T.fonte(10)).pack(anchor="w")
+        cu = Cartao(self, "Atualizações", T.CIANO)
+        cu.pack(fill="x", padx=26, pady=8)
+        self.upd = tk.Label(cu.corpo, text=f"Versão instalada: {VERSAO}", bg=T.PANEL, fg=T.MUDO, font=T.fonte(10))
+        self.upd.pack(side="left")
+        Botao(cu.corpo, "Verificar agora", self.verificar).pack(side="right")
         c2 = Cartao(self, "Sobre")
         c2.pack(fill="x", padx=26, pady=8)
         tk.Label(c2.corpo, bg=T.PANEL, fg=T.MUDO, font=T.fonte(10), justify="left", anchor="w",
                  text=f"{APP} {VERSAO}\nAdministrador: {'sim' if is_admin() else 'NÃO (algumas funções ficam limitadas)'}\n"
                       f"Dados e logs: {PASTA}").pack(anchor="w")
+
+    def verificar(self):
+        self.upd.config(text="Verificando...", fg=T.CIANO)
+
+        def fim(res):
+            nova, tag, url, msg = res
+            self.upd.config(text=msg, fg=T.AMARELO if nova else T.VERDE)
+            self.app.marcar_update(nova, url, msg)
+            if nova and messagebox.askyesno(APP, f"{msg}\nAbrir a página para baixar?"):
+                webbrowser.open(url)
+        self.app.bg(up.verificar, fim)
 
     def salvar(self):
         self.cfg["restauracao_auto"] = self.v1.get()
@@ -890,6 +1089,9 @@ class App(tk.Tk):
         self.drivers, self.erros_pnp = [], []
         self.atual = None
         self.ultima = None
+        self.gravador = bn.Gravador()
+        self.visivel = True
+        self.url_update = ""
         self.sens = hw.Sensores()
 
         lateral = tk.Frame(self, bg=T.SIDEBAR, width=230)
@@ -914,6 +1116,12 @@ class App(tk.Tk):
         tk.Label(lateral, text="● Administrador" if adm else "⚠ Sem administrador", bg=T.SIDEBAR,
                  fg=T.VERDE if adm else T.AMARELO, font=T.fonte(9)).pack(side="bottom", anchor="w", padx=22, pady=14)
 
+        self.lbl_update = tk.Label(lateral, text="", bg=T.SIDEBAR, fg=T.AMARELO, font=T.fonte(9, True), cursor="hand2",
+                                   wraplength=200, justify="left")
+        self.lbl_update.pack(side="bottom", anchor="w", padx=22)
+        self.lbl_update.bind("<Button-1>", lambda e: self.url_update and webbrowser.open(self.url_update))
+        self.bind("<Unmap>", lambda e: e.widget is self and setattr(self, "visivel", False))
+        self.bind("<Map>", lambda e: e.widget is self and setattr(self, "visivel", True))
         self.conteudo = tk.Frame(self, bg=T.BG)
         self.conteudo.pack(side="left", fill="both", expand=True)
         classes = dict(dashboard=Dashboard, analise=Analise, diagnostico=Diagnostico, drivers=Drivers, game=GameBoost,
@@ -923,6 +1131,7 @@ class App(tk.Tk):
         self.ir("dashboard")
         self.after(50, self._poll)
         threading.Thread(target=self._monitorar, daemon=True).start()
+        self.bg(up.verificar, lambda r: self.marcar_update(r[0], r[2], r[3]), lambda e: None)
 
     # ---- navegação
     def _hover(self, chave, entrou):
@@ -946,6 +1155,29 @@ class App(tk.Tk):
         pg.on_show()
         if iniciar and hasattr(pg, "iniciar"):
             self.after(100, pg.iniciar)
+
+    def marcar_update(self, nova, url, msg):
+        self.url_update = url if nova else ""
+        self.lbl_update.config(text=("⬆ " + msg + "\n(clique para baixar)") if nova else "")
+
+    def janela_texto(self, titulo, texto):
+        j = tk.Toplevel(self)
+        j.title(titulo)
+        j.configure(bg=T.BG)
+        j.geometry("720x520")
+        tk.Label(j, text=titulo, bg=T.BG, fg=T.TEXTO, font=T.fonte(14, True)).pack(anchor="w", padx=16, pady=(12, 4))
+        f, t = texto_rolavel(j, 20, mono=False)
+        f.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        t.insert("end", texto)
+
+    def exportar_html(self):
+        if not self.ctx:
+            messagebox.showinfo(APP, "Faça a Análise completa primeiro.")
+            return
+        from datetime import datetime as _dt
+        arq = PASTA_REL / f"relatorio_{_dt.now():%Y%m%d_%H%M%S}.html"
+        arq.write_text(rel.gerar(self.ctx, self.problemas, self.geral, self.notas), encoding="utf-8")
+        webbrowser.open(arq.as_uri())
 
     # ---- threads
     def post(self, fn):
@@ -976,6 +1208,9 @@ class App(tk.Tk):
         n = 0
         while True:
             try:
+                if not self.visivel and not self.gravador.ativo:
+                    time.sleep(2)
+                    continue
                 if n % 4 == 0 and self.atual in ("dashboard", "monitor"):
                     self.sens.atualizar_lento()
                 s = self.sens.amostra()
@@ -987,6 +1222,10 @@ class App(tk.Tk):
             time.sleep(1)
 
     def _amostra(self, s):
+        ov = self.paginas["game"].overlay
+        if ov and ov.rodando:
+            s["fps"] = ov.fps_atual
+        self.gravador.add(s)
         pg = self.paginas.get(self.atual)
         if pg:
             pg.on_sample(s)

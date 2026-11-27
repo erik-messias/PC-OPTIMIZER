@@ -56,7 +56,13 @@ def aplicar_estilos(root):
         s.configure(o, background=BORDA, troughcolor=PANEL, bordercolor=PANEL, lightcolor=BORDA, darkcolor=BORDA,
                     arrowcolor=MUDO, relief="flat", gripcount=0)
         s.map(o, background=[("active", MUDO), ("pressed", CIANO)])
-    s.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2, foreground=TEXTO, arrowcolor=CIANO)
+    s.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2, foreground=TEXTO, arrowcolor=CIANO,
+                bordercolor=BORDA, lightcolor=PANEL2, darkcolor=PANEL2, selectbackground=PANEL2, selectforeground=TEXTO)
+    s.map("TCombobox", fieldbackground=[("readonly", PANEL2)], foreground=[("readonly", TEXTO)],
+          selectbackground=[("readonly", PANEL2)], selectforeground=[("readonly", TEXTO)])
+    root.option_add("*TCombobox*Listbox.background", PANEL2)
+    root.option_add("*TCombobox*Listbox.foreground", TEXTO)
+    root.option_add("*TCombobox*Listbox.selectBackground", "#1d3557")
 
 
 def misturar(c1, c2, t):

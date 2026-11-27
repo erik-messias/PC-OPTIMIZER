@@ -1,0 +1,884 @@
+"""Janela principal do NEXUS PC: menu lateral, dashboard e páginas."""
+import ctypes
+import os
+import queue
+import sys
+import threading
+import time
+import tkinter as tk
+import webbrowser
+from datetime import datetime
+from tkinter import filedialog, messagebox, ttk
+
+from .. import cleaning, diagnostics as dg, drivers as drv, hardware as hw, optimize as opt
+from ..core import (APP, HIST, IS_WIN, PASTA, PASTA_REL, VERSAO, carregar_config, fmt_bytes, is_admin, log,
+                    plano_ativo, salvar_config)
+from . import theme as T
+from .widgets import Botao, Cartao, Grafico, Medidor, texto_rolavel, titulo_pagina
+
+MENU = [("dashboard", "Dashboard", "◈"), ("analise", "Análise completa", "⚡"), ("diagnostico", "Diagnóstico", "✚"),
+        ("drivers", "Drivers", "⛭"), ("game", "Game Boost", "▶"), ("work", "Work Boost", "▣"),
+        ("monitor", "Monitoramento", "∿"), ("reparo", "Reparação do Windows", "⚙"), ("limpeza", "Limpeza", "✦"),
+        ("startup", "Inicialização", "⏻"), ("historico", "Histórico", "☰"), ("config", "Configurações", "⚑")]
+
+
+# =============================================================================== base
+class Pagina(tk.Frame):
+    def __init__(self, app):
+        super().__init__(app.conteudo, bg=T.BG)
+        self.app = app
+
+    def on_show(self):
+        pass
+
+    def on_sample(self, s):
+        pass
+
+
+def arvore(master, colunas, larguras, altura=10, multi=False):
+    """Treeview escuro com barra de rolagem. colunas = [(id, titulo)]"""
+    f = tk.Frame(master, bg=T.PANEL, highlightthickness=1, highlightbackground=T.BORDA)
+    tv = ttk.Treeview(f, columns=[c[0] for c in colunas], show="headings", height=altura,
+                      selectmode="extended" if multi else "browse")
+    for (cid, titulo), w in zip(colunas, larguras):
+        tv.heading(cid, text=titulo, anchor="w")
+        tv.column(cid, width=w, anchor="w", stretch=(w > 150))
+    sb = ttk.Scrollbar(f, orient="vertical", command=tv.yview)
+    tv.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    tv.pack(side="left", fill="both", expand=True)
+    for nome, cor in (("crítico", T.VERMELHO), ("alto", T.LARANJA), ("médio", T.AMARELO), ("baixo", T.AZUL),
+                      ("info", T.MUDO), ("ok", T.VERDE), ("sus", T.AMARELO)):
+        tv.tag_configure(nome, foreground=cor)
+    return f, tv
+
+
+def linha_botoes(master):
+    f = tk.Frame(master, bg=T.BG)
+    f.pack(fill="x", padx=26, pady=6)
+    return f
+
+
+def barra_progresso(master):
+    c = tk.Canvas(master, height=14, bg=T.PANEL2, highlightthickness=0)
+    c.valor = 0.0
+
+    def desenhar(v):
+        c.valor = v
+        c.delete("all")
+        w = c.winfo_width()
+        c.create_rectangle(0, 0, w * v / 100, 14, fill=T.CIANO, outline="")
+        c.create_rectangle(max(0, w * v / 100 - 40), 0, w * v / 100, 14, fill="#67e8f9", outline="", stipple="gray50")
+    c.set = desenhar
+    return c
+
+
+# ============================================================================ dashboard
+class Dashboard(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Dashboard", "Visão geral do seu computador em tempo real.")
+        topo = tk.Frame(self, bg=T.BG)
+        topo.pack(fill="x", padx=26, pady=6)
+        c1 = Cartao(topo, "Saúde do sistema")
+        c1.pack(side="left", fill="y")
+        self.saude = Medidor(c1.corpo, 190, 14)
+        self.saude.pack()
+        self.estado = tk.Label(c1.corpo, text="Execute a análise completa", bg=T.PANEL, fg=T.MUDO, font=T.fonte(10))
+        self.estado.pack(pady=(2, 8))
+        Botao(c1.corpo, "ANÁLISE COMPLETA DO SISTEMA", lambda: app.ir("analise", iniciar=True), "primario").pack(fill="x")
+
+        c2 = Cartao(topo, "Pontuação por categoria", T.ROXO)
+        c2.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        self.barras = {}
+        for cat in dg.CATEGORIAS:
+            linha = tk.Frame(c2.corpo, bg=T.PANEL)
+            linha.pack(fill="x", pady=5)
+            tk.Label(linha, text=cat, width=14, anchor="w", bg=T.PANEL, fg=T.TEXTO, font=T.fonte(10)).pack(side="left")
+            cv = tk.Canvas(linha, height=10, bg=T.PANEL2, highlightthickness=0)
+            cv.pack(side="left", fill="x", expand=True, padx=8)
+            val = tk.Label(linha, text="--", width=4, bg=T.PANEL, fg=T.MUDO, font=T.fonte(10, True))
+            val.pack(side="left")
+            self.barras[cat] = (cv, val)
+
+        grade = tk.Frame(self, bg=T.BG)
+        grade.pack(fill="both", expand=True, padx=26, pady=(6, 10))
+        self.g = {}
+        defs = [("cpu_temp", "Temp. CPU", T.CIANO), ("gpu_temp", "Temp. GPU", T.ROXO), ("ram", "Memória RAM", T.AZUL),
+                ("cpu", "Processador", T.CIANO), ("gpu", "Placa de vídeo", T.ROXO), ("disco", "Disco livre", T.VERDE)]
+        for i, (k, nome, cor) in enumerate(defs):
+            c = Cartao(grade, nome, cor)
+            c.grid(row=i // 4, column=i % 4, sticky="nsew", padx=5, pady=5)
+            m = Medidor(c.corpo, 104, 9)
+            m.pack()
+            m.cor = cor
+            self.g[k] = m
+        for k, nome, cor in (("problemas", "Problemas", T.AMARELO), ("drivers", "Drivers", T.VERDE)):
+            idx = len(self.g)
+            c = Cartao(grade, nome, cor)
+            c.grid(row=idx // 4, column=idx % 4, sticky="nsew", padx=5, pady=5)
+            lbl = tk.Label(c.corpo, text="--", bg=T.PANEL, fg=T.MUDO, font=T.fonte(30, True))
+            lbl.pack(pady=(14, 0))
+            sub = tk.Label(c.corpo, text="sem análise", bg=T.PANEL, fg=T.MUDO, font=T.fonte(9))
+            sub.pack(pady=(0, 16))
+            self.g[k] = (lbl, sub)
+        for c in range(4):
+            grade.columnconfigure(c, weight=1)
+        self._n = 0
+        self._disco = None
+
+    def on_show(self):
+        self.atualizar_analise()
+
+    def atualizar_analise(self):
+        a = self.app
+        if a.geral is not None:
+            self.saude.set(a.geral, str(a.geral), "de 100", T.cor_nota(a.geral))
+            self.estado.config(text=T.rotulo_nota(a.geral), fg=T.cor_nota(a.geral))
+            for cat, (cv, val) in self.barras.items():
+                n = a.notas[cat][0]
+                cv.delete("all")
+                cv.update_idletasks()
+                cv.create_rectangle(0, 0, cv.winfo_width() * n / 100, 10, fill=T.cor_nota(n), outline="")
+                val.config(text=str(n), fg=T.cor_nota(n))
+            lbl, sub = self.g["problemas"]
+            graves = sum(1 for p in a.problemas if p.gravidade in ("crítico", "alto"))
+            lbl.config(text=str(len(a.problemas)), fg=T.VERMELHO if graves else T.AMARELO if a.problemas else T.VERDE)
+            sub.config(text=f"{graves} graves" if a.problemas else "nenhum problema")
+            lbl, sub = self.g["drivers"]
+            aten = [p for p in a.problemas if p.categoria == "Drivers" and p.gravidade != "info"]
+            lbl.config(text=str(len(aten)) if aten else "OK", fg=T.AMARELO if aten else T.VERDE)
+            sub.config(text="precisam de atenção" if aten else "tudo em ordem")
+
+    def on_sample(self, s):
+        g = self.g
+        ct = s.get("cpu_temp")
+        g["cpu_temp"].set(ct or 0, f"{ct:.0f}°" if ct else "N/D", "", T.VERMELHO if (ct or 0) >= 85 else T.CIANO)
+        gt = s.get("gpu_temp")
+        g["gpu_temp"].set(gt or 0, f"{gt:.0f}°" if gt else "N/D", "", T.VERMELHO if (gt or 0) >= 85 else T.ROXO)
+        g["ram"].set(s["ram_pct"], f"{s['ram_pct']:.0f}%", fmt_bytes(s["ram_usada"]),
+                     T.VERMELHO if s["ram_pct"] >= 90 else T.AZUL)
+        g["cpu"].set(s["cpu"], f"{s['cpu']:.0f}%", f"{s['cpu_freq']:.0f} MHz" if s["cpu_freq"] else "")
+        gu = s.get("gpu_util")
+        g["gpu"].set(gu or 0, f"{gu:.0f}%" if gu is not None else "N/D")
+        self._n += 1
+        if self._n % 10 == 1:
+            try:
+                usos = hw.discos_uso()
+                if usos:
+                    pior = min(usos, key=lambda u: u[3] / u[1])
+                    self._disco = (pior[0], pior[3] / pior[1] * 100, pior[3])
+            except Exception:  # noqa: BLE001
+                pass
+        if self._disco:
+            letra, pct, livre = self._disco
+            g["disco"].set(pct, f"{pct:.0f}%", f"{letra} {fmt_bytes(livre)}", T.VERMELHO if pct < 10 else T.VERDE)
+
+
+# ======================================================================= análise completa
+class Analise(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Análise completa", "Lê o hardware, o Windows, os drivers e as temperaturas, "
+                      "interpreta os resultados e calcula a pontuação de saúde.")
+        r = linha_botoes(self)
+        self.btn = Botao(r, "⚡ INICIAR ANÁLISE", self.iniciar, "primario")
+        self.btn.pack(side="left")
+        self.btn_diag = Botao(r, "Ver diagnóstico", lambda: app.ir("diagnostico"))
+        self.btn_diag.pack(side="left", padx=8)
+        self.btn_rel = Botao(r, "Abrir relatórios", lambda: os.startfile(PASTA_REL) if IS_WIN else None)
+        self.btn_rel.pack(side="left")
+        self.pct = tk.Label(self, text="0%", bg=T.BG, fg=T.CIANO, font=T.fonte(26, True))
+        self.pct.pack(anchor="w", padx=26)
+        self.barra = barra_progresso(self)
+        self.barra.pack(fill="x", padx=26, pady=4)
+        self.etapa = tk.Label(self, text="Pronto para analisar.", bg=T.BG, fg=T.MUDO, font=T.fonte(10))
+        self.etapa.pack(anchor="w", padx=26)
+        f, self.txt = texto_rolavel(self, 16)
+        f.pack(fill="both", expand=True, padx=26, pady=10)
+        self.ocupado = False
+
+    def escrever(self, m):
+        self.txt.insert("end", m + "\n")
+        self.txt.see("end")
+
+    def iniciar(self):
+        if self.ocupado:
+            return
+        self.ocupado = True
+        self.txt.delete("1.0", "end")
+        self.btn.ativar(False)
+        t0 = time.time()
+
+        def prog(pct, msg):
+            self.app.post(lambda: (self.barra.set(pct), self.pct.config(text=f"{pct}%"),
+                                   self.etapa.config(text=msg), self.escrever(f"[{pct:>3}%] {msg}")))
+
+        def trabalho():
+            ctx = dg.coletar_contexto(prog)
+            probs = dg.diagnosticar(ctx)
+            geral, notas = dg.pontuar(probs)
+            texto = dg.texto_relatorio(ctx, probs, geral, notas)
+            arq = PASTA_REL / f"analise_{datetime.now():%Y%m%d_%H%M%S}.txt"
+            try:
+                arq.write_text(texto, encoding="utf-8")
+            except OSError:
+                arq = None
+            return ctx, probs, geral, notas, arq
+
+        def fim(res):
+            ctx, probs, geral, notas, arq = res
+            a = self.app
+            a.ctx, a.problemas, a.geral, a.notas = ctx, probs, geral, notas
+            self.barra.set(100)
+            self.pct.config(text="100%")
+            self.etapa.config(text=f"Concluída em {time.time() - t0:.0f}s.", fg=T.VERDE)
+            self.escrever(f"\nPONTUAÇÃO GERAL: {geral}/100 ({T.rotulo_nota(geral)})")
+            for c in dg.CATEGORIAS:
+                self.escrever(f"  {c:<15}{notas[c][0]:>4}")
+            self.escrever(f"\n{len(probs)} problema(s) encontrado(s)."
+                          + (f"\nRelatório salvo em: {arq}" if arq else ""))
+            HIST.registrar("Análise completa", "Solicitada pelo usuário", f"Nota {geral}/100, {len(probs)} problemas")
+            self.btn.ativar(True)
+            self.ocupado = False
+
+        def erro(e):
+            self.escrever(f"ERRO: {e}")
+            self.btn.ativar(True)
+            self.ocupado = False
+        self.app.bg(trabalho, fim, erro)
+
+
+# ========================================================================== diagnóstico
+class Diagnostico(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Diagnóstico inteligente",
+                      "Cada problema mostra se é CONFIRMADO (há evidência) ou SUSPEITA (indício), com causas e correção.")
+        corpo = tk.Frame(self, bg=T.BG)
+        corpo.pack(fill="both", expand=True, padx=26, pady=6)
+        esq = tk.Frame(corpo, bg=T.BG)
+        esq.pack(side="left", fill="both", expand=True)
+        f, self.tv = arvore(esq, [("g", "Gravidade"), ("s", "Situação"), ("c", "Categoria"), ("t", "Problema")],
+                            [85, 90, 125, 320], altura=14)
+        f.pack(fill="both", expand=True)
+        self.tv.bind("<<TreeviewSelect>>", self.selecionar)
+        dir_ = tk.Frame(corpo, bg=T.BG, width=380)
+        dir_.pack(side="left", fill="both", padx=(12, 0))
+        f2, self.det = texto_rolavel(dir_, 14, mono=False)
+        f2.pack(fill="both", expand=True)
+        for k, c in T.GRAVIDADE_COR.items():
+            self.det.tag_configure(k, foreground=c, font=T.fonte(12, True))
+        self.det.tag_configure("h", foreground=T.CIANO, font=T.fonte(10, True))
+        self.det.tag_configure("conf", foreground=T.VERDE)
+        self.det.tag_configure("susp", foreground=T.AMARELO)
+        c = Cartao(self, "Como a nota foi calculada", T.ROXO)
+        c.pack(fill="x", padx=26, pady=(6, 14))
+        self.calc = tk.Label(c.corpo, text="Execute a análise completa.", bg=T.PANEL, fg=T.MUDO, font=T.fonte(9),
+                             justify="left", anchor="w", wraplength=900)
+        self.calc.pack(anchor="w")
+        self.lista = []
+
+    def on_show(self):
+        a = self.app
+        self.tv.delete(*self.tv.get_children())
+        self.lista = a.problemas
+        for i, p in enumerate(self.lista):
+            self.tv.insert("", "end", iid=str(i), values=(p.gravidade, p.status, p.categoria, p.titulo), tags=(p.gravidade,))
+        self.det.delete("1.0", "end")
+        if a.geral is None:
+            self.det.insert("end", "Nenhuma análise feita ainda. Vá em 'Análise completa'.")
+            return
+        if not self.lista:
+            self.det.insert("end", "Nenhum problema encontrado. Excelente!")
+        pesos = ", ".join(f"{c} {dg.PESOS[c]}%" for c in dg.CATEGORIAS)
+        self.calc.config(text=(
+            "Cada categoria começa em 100. Problemas confirmados descontam: crítico -35, alto -20, médio -10, baixo -4; "
+            "suspeitas descontam metade. Idade ou modelo do hardware NÃO desconta pontos. "
+            f"Pesos da nota geral: {pesos}. Nota geral: {a.geral}/100."))
+
+    def selecionar(self, _):
+        sel = self.tv.selection()
+        if not sel:
+            return
+        p = self.lista[int(sel[0])]
+        d = self.det
+        d.delete("1.0", "end")
+        d.insert("end", f"{p.gravidade.upper()}\n", p.gravidade)
+        d.insert("end", f"{p.titulo}\n", "h")
+        d.insert("end", ("● CONFIRMADO" if p.status == "confirmado" else "○ SUSPEITA") + f"  •  {p.categoria}\n\n",
+                 "conf" if p.status == "confirmado" else "susp")
+        d.insert("end", "O que está acontecendo\n", "h")
+        d.insert("end", p.explicacao + "\n\n")
+        if p.causas:
+            d.insert("end", "Possíveis causas\n", "h")
+            d.insert("end", "\n".join("• " + c for c in p.causas) + "\n\n")
+        if p.recomendacao:
+            d.insert("end", "Recomendação\n", "h")
+            d.insert("end", p.recomendacao + "\n")
+        if p.evidencia:
+            d.insert("end", "\nEvidência: ", "h")
+            d.insert("end", p.evidencia)
+
+
+# ============================================================================== drivers
+class Drivers(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Central inteligente de drivers",
+                      "Identifica drivers ausentes, genéricos e antigos. Nada é instalado sem a sua aprovação.")
+        r = linha_botoes(self)
+        Botao(r, "1  Ler drivers", self.ler, "primario").pack(side="left")
+        Botao(r, "2  Windows Update", self.buscar).pack(side="left", padx=6)
+        Botao(r, "3  Instalar selecionados", self.instalar).pack(side="left")
+        Botao(r, "Gerenc. de Dispositivos", lambda: os.startfile("devmgmt.msc") if IS_WIN else None).pack(side="left", padx=6)
+        self.btn_gpu = Botao(r, "Site da placa de vídeo", self.site_gpu)
+        self.btn_gpu.pack(side="left")
+        self.so_aten = tk.BooleanVar(value=True)
+        tk.Checkbutton(self, text="Mostrar só os que precisam de atenção", variable=self.so_aten, command=self.popular,
+                       bg=T.BG, fg=T.TEXTO, selectcolor=T.PANEL2, activebackground=T.BG, activeforeground=T.TEXTO,
+                       font=T.fonte(10)).pack(anchor="w", padx=26)
+        f, self.tv = arvore(self, [("s", "Situação"), ("n", "Dispositivo"), ("c", "Classe"), ("f", "Fabricante"),
+                                   ("v", "Versão"), ("d", "Data")], [90, 280, 80, 220, 130, 90], altura=9)
+        f.pack(fill="both", expand=True, padx=26, pady=4)
+        tk.Label(self, text="Atualizações disponíveis (Windows Update) — selecione e clique em 'Instalar selecionados'",
+                 bg=T.BG, fg=T.CIANO, font=T.fonte(10, True)).pack(anchor="w", padx=26, pady=(6, 0))
+        f2, self.tv_wu = arvore(self, [("n", "Driver"), ("f", "Fabricante"), ("c", "Classe"), ("d", "Data"), ("t", "Tamanho")],
+                                [360, 170, 100, 90, 90], altura=5, multi=True)
+        f2.pack(fill="x", padx=26, pady=4)
+        self.status = tk.Label(self, text="", bg=T.BG, fg=T.MUDO, font=T.fonte(9), anchor="w", justify="left", wraplength=1000)
+        self.status.pack(fill="x", padx=26, pady=(2, 10))
+        self.drivers, self.erros, self.wu = [], [], []
+
+    def msg(self, t, cor=T.MUDO):
+        self.status.config(text=t, fg=cor)
+
+    def ler(self):
+        self.msg("Lendo drivers (pode levar até 1 minuto)...", T.CIANO)
+
+        def fim(res):
+            self.drivers, erros = res
+            self.erros = drv.classificar_erros(erros)
+            self.app.drivers, self.app.erros_pnp = self.drivers, self.erros
+            self.popular()
+            aten = sum(1 for d in self.drivers if d["status"] != "ok") + len(self.erros)
+            self.msg(f"{len(self.drivers)} drivers lidos; {aten} precisam de atenção.", T.VERDE if not aten else T.AMARELO)
+        self.app.bg(drv.ler_drivers, fim, lambda e: self.msg(f"Erro: {e}", T.VERMELHO))
+
+    def popular(self):
+        self.tv.delete(*self.tv.get_children())
+        for e in self.erros:
+            self.tv.insert("", "end", values=("ERRO", e["nome"], e["classe"], e["causa"][:38], f"código {e['codigo']}", ""),
+                           tags=("crítico",))
+        nomes = {"ok": ("OK", "ok"), "generico": ("GENÉRICO", "médio"), "antigo": ("ANTIGO", "baixo")}
+        for d in sorted(self.drivers, key=lambda x: (x["status"] == "ok", x.get("DeviceClass") or "")):
+            if self.so_aten.get() and d["status"] == "ok":
+                continue
+            rot, tag = nomes[d["status"]]
+            self.tv.insert("", "end", values=(rot, d.get("DeviceName"), d.get("DeviceClass"),
+                                              d.get("DriverProviderName") or d.get("Manufacturer") or "", d.get("DriverVersion"),
+                                              d.get("data")), tags=(tag,))
+
+    def buscar(self):
+        self.msg("Procurando drivers no Windows Update (pode levar alguns minutos)...", T.CIANO)
+
+        def fim(res):
+            if res is None:
+                self.msg("Não foi possível consultar o Windows Update. Verifique a internet.", T.VERMELHO)
+                return
+            self.wu = res
+            self.tv_wu.delete(*self.tv_wu.get_children())
+            for i, w in enumerate(res):
+                self.tv_wu.insert("", "end", iid=str(i), values=(w.get("titulo"), w.get("fab"), w.get("classe"),
+                                                                 w.get("data"), fmt_bytes(w.get("tamanho"))))
+            self.msg(f"{len(res)} driver(s) disponível(is)." if res else "Nenhum driver pendente. Tudo atualizado pelo Windows Update.",
+                     T.AMARELO if res else T.VERDE)
+        self.app.bg(drv.buscar_atualizacoes, fim, lambda e: self.msg(f"Erro: {e}", T.VERMELHO))
+
+    def instalar(self):
+        sel = [self.wu[int(i)] for i in self.tv_wu.selection()]
+        if not sel:
+            messagebox.showinfo(APP, "Selecione na lista de baixo os drivers que deseja instalar.")
+            return
+        lista = "\n".join("• " + (s.get("titulo") or "")[:90] for s in sel[:12])
+        if not messagebox.askyesno(APP, f"Instalar {len(sel)} driver(s)?\n\n{lista}\n\n"
+                                        "Antes será criado um ponto de restauração e os drivers atuais serão salvos.\n"
+                                        "Riscos: um driver novo pode, raramente, causar instabilidade. "
+                                        "Você aprova a instalação?"):
+            return
+        self.msg("Instalando...", T.CIANO)
+
+        def prog(m):
+            self.app.post(lambda: self.msg(m, T.CIANO))
+
+        def fim(res):
+            ok, texto, reiniciar = res
+            self.msg(texto, T.VERDE if ok else T.VERMELHO)
+            if reiniciar:
+                messagebox.showinfo(APP, "É preciso REINICIAR o PC para concluir a instalação dos drivers.")
+        self.app.bg(lambda: drv.instalar_atualizacoes(sel, self.drivers, prog), fim,
+                    lambda e: self.msg(f"Erro: {e}", T.VERMELHO))
+
+    def site_gpu(self):
+        nomes = [d.get("DeviceName") for d in self.drivers if (d.get("DeviceClass") or "").upper() == "DISPLAY"]
+        if not nomes and self.app.ctx:
+            nomes = [g.get("Name") for g in self.app.ctx["inv"].get("gpu", [])]
+        for n in nomes:
+            m = drv.marca_gpu(n)
+            if m:
+                webbrowser.open(m[1])
+                self.msg(f"Aberto o site oficial {m[0]}. Baixe SOMENTE do site do fabricante.", T.VERDE)
+                return
+        self.msg("Leia os drivers primeiro (botão 1) para detectar a placa de vídeo.", T.AMARELO)
+
+
+# =============================================================================== boost
+class PainelProcessos(tk.Frame):
+    def __init__(self, master, app):
+        super().__init__(master, bg=T.BG)
+        self.app = app
+        f, self.tv = arvore(self, [("n", "Processo"), ("p", "PID"), ("m", "Memória")], [260, 80, 110], altura=7)
+        f.pack(fill="both", expand=True)
+        r = tk.Frame(self, bg=T.BG)
+        r.pack(fill="x", pady=4)
+        Botao(r, "↻ Atualizar", self.atualizar).pack(side="left")
+        Botao(r, "Encerrar selecionado", self.encerrar, "perigo").pack(side="left", padx=6)
+
+    def atualizar(self):
+        self.tv.delete(*self.tv.get_children())
+        for n, pid, ram, _ in hw.top_processos(12):
+            self.tv.insert("", "end", values=(n, pid, fmt_bytes(ram)))
+
+    def encerrar(self):
+        sel = self.tv.selection()
+        if not sel:
+            return
+        n, pid, _ = self.tv.item(sel[0], "values")
+        if messagebox.askyesno(APP, f"Encerrar '{n}'?\nTrabalho não salvo nele será perdido."):
+            ok, m = opt.encerrar_processo(int(pid), n)
+            messagebox.showinfo(APP, m)
+            self.atualizar()
+
+
+class GameBoost(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Game Boost", "Perfis de desempenho para jogos. Toda mudança é registrada e pode ser desfeita no Histórico.")
+        r = linha_botoes(self)
+        for chave, p in opt.PERFIS.items():
+            Botao(r, p["nome"], lambda c=chave: self.perfil(c), "primario" if chave == "maximo" else "sec").pack(side="left", padx=(0, 6))
+        self.plano = tk.Label(self, text="", bg=T.BG, fg=T.CIANO, font=T.fonte(10, True))
+        self.plano.pack(anchor="w", padx=26)
+        self.desc = tk.Label(self, text="Escolha um perfil acima.", bg=T.BG, fg=T.MUDO, font=T.fonte(10))
+        self.desc.pack(anchor="w", padx=26)
+        corpo = tk.Frame(self, bg=T.BG)
+        corpo.pack(fill="both", expand=True, padx=26, pady=8)
+        esq = Cartao(corpo, "Processos que mais usam memória")
+        esq.pack(side="left", fill="both", expand=True)
+        self.proc = PainelProcessos(esq.corpo, app)
+        self.proc.pack(fill="both", expand=True)
+        dir_ = Cartao(corpo, "Recomendações para o seu hardware", T.ROXO)
+        dir_.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        f, self.dicas = texto_rolavel(dir_.corpo, 9, mono=False)
+        f.pack(fill="both", expand=True)
+        r2 = linha_botoes(self)
+        Botao(r2, "🎮 Contador de FPS", self.fps).pack(side="left")
+        Botao(r2, "Usar GPU potente em um jogo…", self.gpu).pack(side="left", padx=6)
+        self.overlay = None
+        self.perfil_atual = "equilibrado"
+
+    def on_show(self):
+        self.plano.config(text=f"Plano de energia atual: {plano_ativo()[1] or 'desconhecido'}")
+        self.proc.atualizar()
+        self.mostrar_dicas()
+
+    def mostrar_dicas(self):
+        self.dicas.delete("1.0", "end")
+        if not self.app.ctx:
+            self.dicas.insert("end", "Execute a Análise completa para receber recomendações específicas do seu hardware.")
+            return
+        for d in opt.dicas_graficas(self.app.ctx["inv"], self.perfil_atual):
+            self.dicas.insert("end", "• " + d + "\n\n")
+
+    def perfil(self, chave):
+        p = opt.PERFIS[chave]
+        self.perfil_atual = chave
+        self.desc.config(text=p["desc"])
+        ok, m = opt.aplicar_perfil(chave)
+        self.plano.config(text=f"Plano de energia atual: {plano_ativo()[1]}" if ok else m, fg=T.CIANO if ok else T.VERMELHO)
+        self.mostrar_dicas()
+
+    def fps(self):
+        from .fps import FpsOverlay
+        if self.overlay and self.overlay.rodando:
+            return
+        self.overlay = FpsOverlay(self.app)
+
+    def gpu(self):
+        exe = filedialog.askopenfilename(title="Escolha o .exe do jogo", filetypes=[("Programa", "*.exe")])
+        if exe:
+            ok, m = opt.definir_gpu_alta(exe)
+            messagebox.showinfo(APP, m + ("\nPode desfazer no Histórico." if ok else ""))
+
+
+class WorkBoost(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Work Boost", "Identifica o que mais consome recursos para melhorar a produtividade "
+                      "(navegador com muitas abas, edição, programação, multitarefa).")
+        r = linha_botoes(self)
+        Botao(r, "Aplicar plano Equilibrado", lambda: messagebox.showinfo(APP, opt.aplicar_perfil("equilibrado")[1]), "primario").pack(side="left")
+        c = Cartao(self, "Maiores consumidores de memória")
+        c.pack(fill="both", expand=True, padx=26, pady=8)
+        self.proc = PainelProcessos(c.corpo, app)
+        self.proc.pack(fill="both", expand=True)
+        tk.Label(self, text="Dica: se o navegador aparecer várias vezes no topo, feche abas ou use a suspensão de abas. "
+                 "Perfis automáticos por tipo de trabalho chegam na Fase 4.", bg=T.BG, fg=T.MUDO, font=T.fonte(9),
+                 wraplength=900, justify="left").pack(anchor="w", padx=26, pady=(0, 14))
+
+    def on_show(self):
+        self.proc.atualizar()
+
+
+# ========================================================================== monitoramento
+class Monitor(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Monitoramento em tempo real", "Atualiza a cada segundo. Temperatura de CPU: abra o LibreHardwareMonitor para leitura precisa.")
+        g = tk.Frame(self, bg=T.BG)
+        g.pack(fill="both", expand=True, padx=26, pady=6)
+        defs = [("cpu", "CPU uso", T.CIANO, 100, "%"), ("cpu_temp", "CPU temperatura", T.LARANJA, 110, "°C"),
+                ("cpu_freq", "CPU frequência", T.AZUL, None, " MHz"), ("ram_pct", "Memória RAM", T.ROXO, 100, "%"),
+                ("gpu_util", "GPU uso", T.VERDE, 100, "%"), ("gpu_temp", "GPU temperatura", T.LARANJA, 110, "°C"),
+                ("vram", "GPU VRAM", T.ROXO, 100, "%"), ("disco_leitura", "Disco leitura", T.AZUL, None, " MB/s"),
+                ("disco_escrita", "Disco escrita", T.CIANO, None, " MB/s")]
+        self.graf, self.val = {}, {}
+        for i, (k, nome, cor, mx, un) in enumerate(defs):
+            c = Cartao(g, nome, cor)
+            c.grid(row=i // 3, column=i % 3, sticky="nsew", padx=5, pady=5)
+            v = tk.Label(c.corpo, text="--", bg=T.PANEL, fg=T.TEXTO, font=T.fonte(18, True))
+            v.pack(anchor="w")
+            gr = Grafico(c.corpo, cor, mx, un)
+            gr.pack(fill="x")
+            self.graf[k], self.val[k] = gr, (v, un)
+        for c in range(3):
+            g.columnconfigure(c, weight=1)
+        self.info = tk.Label(self, text="", bg=T.BG, fg=T.MUDO, font=T.fonte(9), justify="left", anchor="w", wraplength=1000)
+        self.info.pack(fill="x", padx=26, pady=(0, 12))
+
+    def on_sample(self, s):
+        vram = None
+        if s.get("gpu_vram") and s["gpu_vram"][1]:
+            vram = s["gpu_vram"][0] / s["gpu_vram"][1] * 100
+        vals = {k: s.get(k) for k in self.graf}
+        vals["vram"] = vram
+        for k, v in vals.items():
+            self.graf[k].push(v)
+            lbl, un = self.val[k]
+            lbl.config(text=f"{v:.0f}{un}" if v is not None else "N/D")
+        n = os.cpu_count() or 0
+        extra = []
+        if s.get("gpu_consumo") is not None:
+            extra.append(f"GPU consumo {s['gpu_consumo']:.0f} W")
+        if s.get("gpu_freq"):
+            extra.append(f"GPU {s['gpu_freq']:.0f} MHz")
+        if s.get("gpu_fan") is not None:
+            extra.append(f"ventoinha GPU {s['gpu_fan']:.0f}%")
+        fontes = ", ".join(s.get("fontes") or []) or "nenhuma (CPU sem sensor disponível)"
+        self.info.config(text=f"Threads lógicas: {n} • RAM {fmt_bytes(s['ram_usada'])} / {fmt_bytes(s['ram_total'])} • "
+                              + " • ".join(extra) + f"\nFonte de temperatura da CPU: {fontes}")
+
+
+# ============================================================================= reparação
+class Reparo(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Reparação do Windows", "Fase 5: integração com SFC, DISM e CHKDSK com explicação passo a passo.")
+        c = Cartao(self, "Em desenvolvimento", T.ROXO)
+        c.pack(fill="x", padx=26, pady=10)
+        tk.Label(c.corpo, bg=T.PANEL, fg=T.MUDO, font=T.fonte(10), justify="left", anchor="w", wraplength=900,
+                 text="Este módulo ainda não está disponível. Planejado para a Fase 5:\n\n"
+                      "• SFC — verifica e repara arquivos protegidos do Windows\n"
+                      "• DISM — verifica a imagem do Windows\n"
+                      "• CHKDSK — verifica o sistema de arquivos\n"
+                      "• Diagnóstico de memória e Visualizador de Eventos\n\n"
+                      "Nenhum reparo destrutivo será executado automaticamente.").pack(anchor="w")
+        r = tk.Frame(c.corpo, bg=T.PANEL)
+        r.pack(anchor="w", pady=10)
+        for nome, cmd in (("Visualizador de Eventos", "eventvwr.msc"), ("Diagnóstico de Memória", "mdsched.exe"),
+                          ("Windows Update", "ms-settings:windowsupdate")):
+            Botao(r, nome, lambda c=cmd: os.startfile(c) if IS_WIN else None).pack(side="left", padx=(0, 6))
+
+
+# ================================================================================ limpeza
+class Limpeza(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Limpeza inteligente", "Veja o que será removido, onde está e quais as consequências. "
+                      "Documentos pessoais e arquivos de jogos nunca são tocados.")
+        r = linha_botoes(self)
+        Botao(r, "🔍 Analisar", self.analisar, "primario").pack(side="left")
+        Botao(r, "Limpar selecionados", self.limpar).pack(side="left", padx=6)
+        self.total = tk.Label(r, text="", bg=T.BG, fg=T.VERDE, font=T.fonte(11, True))
+        self.total.pack(side="left", padx=12)
+        self.lista = tk.Frame(self, bg=T.BG)
+        self.lista.pack(fill="both", expand=True, padx=26, pady=6)
+        self.vars, self.cats = {}, []
+
+    def analisar(self):
+        for w in self.lista.winfo_children():
+            w.destroy()
+        tk.Label(self.lista, text="Analisando...", bg=T.BG, fg=T.CIANO).pack(anchor="w")
+
+        def fim(cats):
+            self.cats = cats
+            for w in self.lista.winfo_children():
+                w.destroy()
+            self.vars = {}
+            total = 0
+            for c in cats:
+                v = tk.BooleanVar(value=c["padrao"])
+                self.vars[c["chave"]] = v
+                caixa = Cartao(self.lista)
+                caixa.pack(fill="x", pady=3)
+                topo = tk.Frame(caixa.corpo, bg=T.PANEL)
+                topo.pack(fill="x")
+                tk.Checkbutton(topo, text=c["nome"], variable=v, bg=T.PANEL, fg=T.TEXTO, selectcolor=T.PANEL2,
+                               activebackground=T.PANEL, activeforeground=T.TEXTO, font=T.fonte(10, True),
+                               command=self.somar).pack(side="left")
+                tk.Label(topo, text=f"{fmt_bytes(c['bytes'])} • {c['arquivos']} itens", bg=T.PANEL,
+                         fg=T.CIANO, font=T.fonte(10, True)).pack(side="right")
+                tk.Label(caixa.corpo, text=f"Onde: {c['locais'][:110]}", bg=T.PANEL, fg=T.MUDO, font=T.fonte(8),
+                         anchor="w").pack(fill="x")
+                tk.Label(caixa.corpo, text=f"Consequência: {c['consequencia']}", bg=T.PANEL, fg=T.ROXO, font=T.fonte(9),
+                         anchor="w", wraplength=900, justify="left").pack(fill="x")
+            self.somar()
+        self.app.bg(cleaning.analisar, fim)
+
+    def somar(self):
+        t = sum(c["bytes"] for c in self.cats if self.vars.get(c["chave"]) and self.vars[c["chave"]].get())
+        self.total.config(text=f"Poderá liberar: {fmt_bytes(t)}")
+
+    def limpar(self):
+        escolhidas = [k for k, v in self.vars.items() if v.get()]
+        if not escolhidas:
+            messagebox.showinfo(APP, "Analise e marque o que deseja limpar.")
+            return
+        cfg = carregar_config()
+        if "navegadores" in escolhidas and not cfg.get("limpar_navegadores"):
+            if not messagebox.askyesno(APP, "Limpar o cache dos navegadores?\nFeche-os antes. Senhas e histórico não são apagados."):
+                escolhidas.remove("navegadores")
+            else:
+                cfg["limpar_navegadores"] = True
+                salvar_config(cfg)
+        if not escolhidas or not messagebox.askyesno(APP, f"Remover {len(escolhidas)} categoria(s) selecionada(s)?"):
+            return
+
+        def fim(b):
+            self.total.config(text=f"Liberado: {fmt_bytes(b)}")
+            messagebox.showinfo(APP, f"{fmt_bytes(b)} liberados.")
+        self.app.bg(lambda: cleaning.limpar(escolhidas), fim)
+
+
+# ============================================================================ inicialização
+class Inicializacao(Pagina):
+    SUSPEITO = ("\\temp\\", "appdata\\local\\temp", "\\users\\public\\", "\\downloads\\")
+
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Gerenciador de inicialização",
+                      "Programas que abrem junto com o Windows. Nesta versão a lista é somente leitura; "
+                      "desativar/reativar chega na Fase 4. Para desativar agora: Gerenciador de Tarefas > Inicializar.")
+        f, self.tv = arvore(self, [("n", "Nome"), ("o", "Origem"), ("c", "Comando"), ("a", "Alerta")], [180, 130, 520, 120], altura=14)
+        f.pack(fill="both", expand=True, padx=26, pady=8)
+        r = linha_botoes(self)
+        Botao(r, "↻ Atualizar", self.on_show).pack(side="left")
+        Botao(r, "Abrir Gerenciador de Tarefas", lambda: os.startfile("taskmgr") if IS_WIN else None).pack(side="left", padx=6)
+
+    def on_show(self):
+        self.tv.delete(*self.tv.get_children())
+        for n, cmd, orig in hw.programas_inicializacao():
+            sus = any(s in cmd.lower() for s in self.SUSPEITO)
+            self.tv.insert("", "end", values=(n, orig, cmd, "SUSPEITO" if sus else ""), tags=("sus",) if sus else ())
+
+
+# ============================================================================== histórico
+class Historico(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Histórico de otimizações", "Tudo o que o NEXUS PC alterou, com data, motivo e resultado.")
+        f, self.tv = arvore(self, [("i", "#"), ("d", "Data"), ("a", "Alteração"), ("m", "Motivo"), ("r", "Resultado"), ("v", "Reversível")],
+                            [40, 140, 170, 260, 260, 90], altura=15)
+        f.pack(fill="both", expand=True, padx=26, pady=8)
+        r = linha_botoes(self)
+        Botao(r, "↶ Reverter selecionado", self.reverter, "primario").pack(side="left")
+        Botao(r, "Abrir pasta de logs", lambda: os.startfile(PASTA) if IS_WIN else None).pack(side="left", padx=6)
+
+    def on_show(self):
+        self.tv.delete(*self.tv.get_children())
+        for id_, data, acao, motivo, res, rev, revertido, _ in HIST.listar():
+            estado = "revertido" if revertido else ("sim" if rev else "não")
+            self.tv.insert("", "end", iid=str(id_), values=(id_, data.replace("T", " "), acao, motivo, res, estado))
+
+    def reverter(self):
+        sel = self.tv.selection()
+        if not sel:
+            return
+        ok, m = HIST.reverter(int(sel[0]))
+        messagebox.showinfo(APP, m)
+        self.on_show()
+
+
+# ============================================================================= configurações
+class Config(Pagina):
+    def __init__(self, app):
+        super().__init__(app)
+        titulo_pagina(self, "Configurações")
+        c = Cartao(self, "Segurança", T.ROXO)
+        c.pack(fill="x", padx=26, pady=8)
+        self.cfg = carregar_config()
+        self.v1 = tk.BooleanVar(value=self.cfg["restauracao_auto"])
+        self.v2 = tk.BooleanVar(value=self.cfg["limpar_navegadores"])
+        for v, t in ((self.v1, "Criar ponto de restauração antes de instalar drivers (recomendado)"),
+                     (self.v2, "Já autorizei a limpeza de cache de navegadores")):
+            tk.Checkbutton(c.corpo, text=t, variable=v, command=self.salvar, bg=T.PANEL, fg=T.TEXTO, selectcolor=T.PANEL2,
+                           activebackground=T.PANEL, activeforeground=T.TEXTO, font=T.fonte(10)).pack(anchor="w")
+        c2 = Cartao(self, "Sobre")
+        c2.pack(fill="x", padx=26, pady=8)
+        tk.Label(c2.corpo, bg=T.PANEL, fg=T.MUDO, font=T.fonte(10), justify="left", anchor="w",
+                 text=f"{APP} {VERSAO}\nAdministrador: {'sim' if is_admin() else 'NÃO (algumas funções ficam limitadas)'}\n"
+                      f"Dados e logs: {PASTA}").pack(anchor="w")
+
+    def salvar(self):
+        self.cfg["restauracao_auto"] = self.v1.get()
+        self.cfg["limpar_navegadores"] = self.v2.get()
+        salvar_config(self.cfg)
+
+
+# ================================================================================== app
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(f"{APP} {VERSAO}")
+        self.geometry("1240x780")
+        self.minsize(1100, 700)
+        self.configure(bg=T.BG)
+        T.aplicar_estilos(self)
+        self.q = queue.Queue()
+        self.ctx, self.problemas, self.geral, self.notas = None, [], None, None
+        self.drivers, self.erros_pnp = [], []
+        self.atual = None
+        self.ultima = None
+        self.sens = hw.Sensores()
+
+        lateral = tk.Frame(self, bg=T.SIDEBAR, width=230)
+        lateral.pack(side="left", fill="y")
+        lateral.pack_propagate(False)
+        tk.Label(lateral, text="NEXUS", bg=T.SIDEBAR, fg=T.CIANO, font=T.fonte(22, True)).pack(anchor="w", padx=22, pady=(22, 0))
+        tk.Label(lateral, text="PC  •  diagnóstico e otimização", bg=T.SIDEBAR, fg=T.MUDO, font=T.fonte(8)).pack(anchor="w", padx=22, pady=(0, 18))
+        self.itens = {}
+        for chave, nome, ic in MENU:
+            f = tk.Frame(lateral, bg=T.SIDEBAR, cursor="hand2")
+            f.pack(fill="x")
+            barra = tk.Frame(f, bg=T.SIDEBAR, width=3)
+            barra.pack(side="left", fill="y")
+            lb = tk.Label(f, text=f"  {ic}   {nome}", bg=T.SIDEBAR, fg=T.MUDO, font=T.fonte(10), anchor="w", pady=9)
+            lb.pack(side="left", fill="x", expand=True)
+            for w in (f, lb):
+                w.bind("<Button-1>", lambda e, c=chave: self.ir(c))
+                w.bind("<Enter>", lambda e, c=chave: self._hover(c, True))
+                w.bind("<Leave>", lambda e, c=chave: self._hover(c, False))
+            self.itens[chave] = (f, lb, barra)
+        adm = is_admin()
+        tk.Label(lateral, text="● Administrador" if adm else "⚠ Sem administrador", bg=T.SIDEBAR,
+                 fg=T.VERDE if adm else T.AMARELO, font=T.fonte(9)).pack(side="bottom", anchor="w", padx=22, pady=14)
+
+        self.conteudo = tk.Frame(self, bg=T.BG)
+        self.conteudo.pack(side="left", fill="both", expand=True)
+        classes = dict(dashboard=Dashboard, analise=Analise, diagnostico=Diagnostico, drivers=Drivers, game=GameBoost,
+                       work=WorkBoost, monitor=Monitor, reparo=Reparo, limpeza=Limpeza, startup=Inicializacao,
+                       historico=Historico, config=Config)
+        self.paginas = {k: c(self) for k, c in classes.items()}
+        self.ir("dashboard")
+        self.after(50, self._poll)
+        threading.Thread(target=self._monitorar, daemon=True).start()
+
+    # ---- navegação
+    def _hover(self, chave, entrou):
+        if chave != self.atual:
+            f, lb, _ = self.itens[chave]
+            cor = "#121826" if entrou else T.SIDEBAR
+            f.config(bg=cor)
+            lb.config(bg=cor, fg=T.TEXTO if entrou else T.MUDO)
+
+    def ir(self, chave, iniciar=False):
+        if self.atual:
+            self.paginas[self.atual].pack_forget()
+        self.atual = chave
+        for k, (f, lb, barra) in self.itens.items():
+            ativo = k == chave
+            f.config(bg="#121826" if ativo else T.SIDEBAR)
+            lb.config(bg="#121826" if ativo else T.SIDEBAR, fg=T.CIANO if ativo else T.MUDO)
+            barra.config(bg=T.CIANO if ativo else T.SIDEBAR)
+        pg = self.paginas[chave]
+        pg.pack(fill="both", expand=True)
+        pg.on_show()
+        if iniciar and hasattr(pg, "iniciar"):
+            self.after(100, pg.iniciar)
+
+    # ---- threads
+    def post(self, fn):
+        self.q.put(fn)
+
+    def bg(self, trabalho, fim=None, erro=None):
+        def run():
+            try:
+                r = trabalho()
+                if fim:
+                    self.post(lambda: fim(r))
+            except Exception as e:  # noqa: BLE001
+                log.exception("falha em tarefa")
+                self.post(lambda: (erro or (lambda x: messagebox.showerror(APP, f"Erro: {x}")))(e))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _poll(self):
+        try:
+            while True:
+                self.q.get_nowait()()
+        except queue.Empty:
+            pass
+        except Exception:  # noqa: BLE001
+            log.exception("erro na fila da interface")
+        self.after(40, self._poll)
+
+    def _monitorar(self):
+        n = 0
+        while True:
+            try:
+                if n % 4 == 0 and self.atual in ("dashboard", "monitor"):
+                    self.sens.atualizar_lento()
+                s = self.sens.amostra()
+                self.ultima = s
+                self.post(lambda s=s: self._amostra(s))
+            except Exception:  # noqa: BLE001
+                log.exception("monitor")
+            n += 1
+            time.sleep(1)
+
+    def _amostra(self, s):
+        pg = self.paginas.get(self.atual)
+        if pg:
+            pg.on_sample(s)
+
+
+def main():
+    if IS_WIN:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:  # noqa: BLE001
+            pass
+        if not is_admin():
+            args = " ".join(f'"{a}"' for a in (sys.argv if not getattr(sys, "frozen", False) else sys.argv[1:]))
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, args, None, 1)
+            return
+    App().mainloop()
